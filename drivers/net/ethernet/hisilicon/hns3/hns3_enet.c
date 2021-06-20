@@ -1504,8 +1504,7 @@ static int hns3_fill_skb_to_desc(struct hns3_enet_ring *ring,
 	return bd_num;
 }
 
-static void hns3_tx_doorbell(struct hns3_enet_ring *ring, int num,
-			     bool doorbell)
+void hns3_tx_doorbell(struct hns3_enet_ring *ring, int num, bool doorbell)
 {
 	ring->pending_buf += num;
 
@@ -2225,6 +2224,7 @@ static const struct net_device_ops hns3_nic_netdev_ops = {
 	.ndo_set_vf_rate	= hns3_nic_set_vf_rate,
 	.ndo_set_vf_mac		= hns3_nic_set_vf_mac,
 	.ndo_bpf 		= hns3_xdp,
+	.ndo_xdp_xmit 		= hns3_xdp_xmit,
 };
 
 bool hns3_is_phys_func(struct pci_dev *pdev)
@@ -2562,7 +2562,9 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 static void hns3_free_buffer(struct hns3_enet_ring *ring,
 			     struct hns3_desc_cb *cb, int budget)
 {
-	if (cb->type == DESC_TYPE_SKB)
+	if (cb->type == DESC_TYPE_XDP_XMIT) {
+		xdp_return_frame_rx_napi(cb->priv);
+	} else if (cb->type == DESC_TYPE_SKB)
 		napi_consume_skb(cb->priv, budget);
 	else if (!HNAE3_IS_TX_RING(ring) && cb->pagecnt_bias)
 		__page_frag_cache_drain(cb->priv, cb->pagecnt_bias);
@@ -2584,6 +2586,12 @@ static int hns3_map_buffer(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
 static void hns3_unmap_buffer(struct hns3_enet_ring *ring,
 			      struct hns3_desc_cb *cb)
 {
+	if (cb->type == DESC_TYPE_XDP_XMIT) {
+		dma_unmap_page(ring_to_dev(ring), cb->dma, cb->length,
+			                 cb->dma_dir);
+		return;
+	}
+
 	if (cb->type == DESC_TYPE_SKB || cb->type == DESC_TYPE_FRAGLIST_SKB)
 		dma_unmap_single(ring_to_dev(ring), cb->dma, cb->length,
 				 cb->dma_dir);
@@ -2801,10 +2809,12 @@ void hns3_clean_tx_ring(struct hns3_enet_ring *ring, int budget)
 	}
 }
 
-static int hns3_desc_unused(struct hns3_enet_ring *ring)
+int hns3_desc_unused(struct hns3_enet_ring *ring)
 {
 	int ntc = ring->next_to_clean;
 	int ntu = ring->next_to_use;
+
+	if (ntc == ntu) return ring->desc_num;
 
 	return ((ntc >= ntu) ? 0 : ring->desc_num) + ntc - ntu;
 }
@@ -3443,6 +3453,10 @@ out:
 	/* Make all data has been write before submit */
 	if (unused_count > 0)
 		hns3_nic_alloc_rx_buffers(ring, unused_count);
+
+	/* complete the XDP */
+	if (hns3_is_xdp_enabled(ring->netdev))
+		hns3_xdp_complete(ring);
 
 	return recv_pkts;
 }

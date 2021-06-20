@@ -379,6 +379,11 @@ struct ring_stats {
 			u64 tx_l4_proto_err;
 			u64 tx_l2l3l4_err;
 			u64 tx_tso_err;
+			u64 xdp_tx_pkts;
+			u64 xdp_tx;
+			u64 xdp_tx_err;
+			u64 xdp_redir;
+			u64 xdp_redir_err;
 		};
 		struct {
 			u64 rx_pkts;
@@ -435,6 +440,7 @@ struct hns3_enet_ring {
 	struct sk_buff *tail_skb;
 
 	/* XDP related fields */
+	DECLARE_BITMAP(xdp_flags, 8);
 	struct bpf_prog *xdp_prog;
 	struct xdp_rxq_info xdp_rxq;
 	struct hns3_enet_ring *xdp_tx_ring;
@@ -628,6 +634,8 @@ int hns3_clean_rx_ring(
 		void (*rx_fn)(struct hns3_enet_ring *, struct sk_buff *));
 void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring);
 int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb);
+int hns3_desc_unused(struct hns3_enet_ring *ring);
+void hns3_tx_doorbell(struct hns3_enet_ring *ring, int num, bool doorbell);
 
 void hns3_set_vector_coalesce_rx_gl(struct hns3_enet_tqp_vector *tqp_vector,
 				    u32 gl_value);
