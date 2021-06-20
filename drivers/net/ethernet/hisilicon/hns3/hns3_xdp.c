@@ -54,6 +54,145 @@ static int hns3_xdp_check(struct net_device *netdev, struct bpf_prog *prog)
 	return 0;
 }
 
+static struct sk_buff *hns3_build_skb(struct hns3_enet_ring *ring, struct xdp_buff *xdp)
+{
+	struct net_device *netdev = ring_to_netdev(ring);
+	u32 truesize = hns3_buf_size(ring);
+	struct sk_buff *skb;
+
+	skb = ring->skb = build_skb(xdp->data_hard_start, truesize);
+	if (unlikely(!skb)) {
+		if (net_ratelimit())
+			netdev_err(netdev, "failed to build skb from xdp buf\n");
+
+		u64_stats_update_begin(&ring->syncp);
+		ring->stats.sw_err_cnt++;
+		u64_stats_update_end(&ring->syncp);
+
+		return ERR_PTR(-ENOMEM);
+	}
+
+	ring->pending_buf = 1;
+
+	skb_reserve(skb, xdp->data - xdp->data_hard_start);
+	skb_put(skb, xdp->data_end - xdp->data);
+
+	u64_stats_update_begin(&ring->syncp);
+	ring->stats.seg_pkt_cnt++;
+	u64_stats_update_end(&ring->syncp);
+
+	hns3_rx_ring_move_fw(ring);
+
+	return skb;
+}
+
+static bool
+hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
+{
+	struct bpf_prog *xdp_prog;
+	u32 act;
+
+	/* RFC Question: should we? Any security risk in this action? */
+	/* Pass the buffer to stack if we cannot get hold of xdp prog */
+	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
+	if (!xdp_prog)
+		return  false;
+
+	act = bpf_prog_run_xdp(xdp_prog, xdp);
+	switch (act) {
+	case XDP_PASS:
+		return false;
+	case XDP_TX:
+		/* transmit the buffer on the XDP TX queue */
+		return true;
+	case XDP_REDIRECT:
+		/* redirect the buffer to other device TX queue */
+		return true;
+	default:
+		bpf_warn_invalid_xdp_action(act);
+		fallthrough;
+	case XDP_ABORTED:
+		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
+		fallthrough;
+	case XDP_DROP:
+		u64_stats_update_begin(&rx_ring->syncp);
+		rx_ring->stats.xdp_rx_drop++;
+		u64_stats_update_end(&rx_ring->syncp);
+		return true;
+	}
+}
+
+int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
+{
+	struct hns3_desc_cb *desc_cb;
+	struct sk_buff *skb = ring->skb;
+	void *data, *data_hard_start;
+	struct hns3_desc *desc;
+	struct xdp_buff xdp;
+	u32 bd_base_info;
+	bool consumed;
+	u32 frag_size;
+	int length, ret;
+
+	desc = &ring->desc[ring->next_to_clean];
+	desc_cb = &ring->desc_cb[ring->next_to_clean];
+
+	/* prefetch the descriptor */
+	prefetch(desc);
+
+	bd_base_info = le32_to_cpu(desc->rx.bd_base_info);
+	/* Check valid BD */
+	if (unlikely(!(bd_base_info & BIT(HNS3_RXD_VLD_B))))
+		return -ENXIO;
+
+	dma_rmb();
+
+	length = le16_to_cpu(desc->rx.size);
+	ring->va = desc_cb->buf + desc_cb->page_offset;
+	data_hard_start = ring->va;
+	data = ring->va + desc_cb->rx_headroom;
+	frag_size = hns3_buf_size(ring);
+
+	dma_sync_single_for_cpu(ring_to_dev(ring),
+			desc_cb->dma + desc_cb->page_offset,
+			frag_size,
+			DMA_FROM_DEVICE);
+
+	/* Prefetch first two cache line of the xdp frame data */
+	net_prefetch(data_hard_start);
+	net_prefetch(data);
+
+	/* initlialize xdp buffer */
+	xdp_init_buff(&xdp, frag_size, &ring->xdp_rxq);
+	xdp_prepare_buff(&xdp, data_hard_start, desc_cb->rx_headroom, length, false);
+	xdp.frame_sz = frag_size;
+
+	/* run xdp program */
+	consumed = hns3_xdp_run(ring, &xdp);
+	if (consumed) {
+		ring->skb = 0;
+		return 0;
+	}
+
+	/* build skb for passing to stack */
+	skb = hns3_build_skb(ring, &xdp);
+	if (IS_ERR(skb))
+		return -ENOMEM;
+
+	if (!(bd_base_info & BIT(HNS3_RXD_FE_B)))
+		netdev_warn(ring_to_netdev(ring), "something is wrong! not a last xdp frag\n");
+
+	ret = hns3_handle_bdinfo(ring, skb);
+	if (unlikely(ret)) {
+		dev_kfree_skb_any(skb);
+		return ret;
+	}
+
+	skb_record_rx_queue(skb, ring->tqp->tqp_index);
+
+	return 0;
+}
+
 static void hns3_attach_bpf_prog(struct net_device *ndev, struct bpf_prog *prog)
 {
 	struct hnae3_handle *h = hns3_get_handle(ndev);

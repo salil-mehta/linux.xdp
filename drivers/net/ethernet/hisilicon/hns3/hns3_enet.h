@@ -392,6 +392,8 @@ struct ring_stats {
 			u64 csum_complete;
 			u64 rx_multicast;
 			u64 non_reuse_pg;
+			u64 xdp_rx_pkts;
+			u64 xdp_rx_drop;
 		};
 	};
 };
@@ -624,6 +626,8 @@ bool hns3_is_phys_func(struct pci_dev *pdev);
 int hns3_clean_rx_ring(
 		struct hns3_enet_ring *ring, int budget,
 		void (*rx_fn)(struct hns3_enet_ring *, struct sk_buff *));
+void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring);
+int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb);
 
 void hns3_set_vector_coalesce_rx_gl(struct hns3_enet_tqp_vector *tqp_vector,
 				    u32 gl_value);
