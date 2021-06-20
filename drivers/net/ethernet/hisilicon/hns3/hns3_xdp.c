@@ -156,9 +156,143 @@ hns3_build_skb(struct hns3_enet_ring *ring, struct xdp_buff *xdp)
 	return skb;
 }
 
+void hns3_xdp_complete(struct hns3_enet_ring *ring)
+{
+	if (unlikely(test_bit(HNS3_XDP_REDIRECT, ring->xdp_flags))) {
+		xdp_do_flush_map();
+		__clear_bit(HNS3_XDP_REDIRECT, ring->xdp_flags);
+	}
+
+	if (unlikely(test_bit(HNS3_XDP_TX, ring->xdp_flags))) {
+		hns3_tx_doorbell(ring->xdp_tx_ring, 1, true);
+		__clear_bit(HNS3_XDP_TX, ring->xdp_flags);
+	}
+}
+
+/**
+ * hns3_xdp_tx - transmits a XDP frame on a tx ring/queue
+ * @tx_ring: XDP TX queue on which frame has to be x'mited
+ * @xdpf: XDP frame to be transmitted
+ * @dma_addr: DMA mapped adress
+ */
+static int
+hns3_xdp_xmit_frame(struct hns3_enet_ring *xdp_ring, struct xdp_frame *xdpf,
+		     dma_addr_t dma_addr)
+{
+	struct hns3_desc_cb *desc_cb;
+	struct hns3_desc *desc;
+
+	if (!unlikely(hns3_desc_unused(xdp_ring)))
+		return -ENOSPC;
+
+	desc_cb = &xdp_ring->desc_cb[xdp_ring->next_to_use];
+	desc_cb->priv = xdpf;
+	desc_cb->length = xdpf->len;
+	desc_cb->dma = dma_addr;
+	desc_cb->type = DESC_TYPE_XDP_XMIT;
+
+	desc = &xdp_ring->desc[xdp_ring->next_to_use];
+	desc->addr = cpu_to_le64(dma_addr);
+	desc->rx.bd_base_info = 0;
+
+	smp_wmb();
+
+	WRITE_ONCE(xdp_ring->last_to_use, xdp_ring->next_to_use);
+	ring_ptr_move_fw(xdp_ring, next_to_use);
+
+	return 0;
+}
+
+/**
+ * hns3_xdp_tx - transmits a XDP buffer on a xdp tx queue
+ * @tx_ring: xdp tx queue on which buffer is to be x'mited
+ * @ring : rx queue from which recvd buff is being bounced
+ * @xdp: XDP buffer to be transmitted
+ */
+static int
+hns3_xdp_tx(struct hns3_enet_ring *tx_ring, struct hns3_enet_ring *ring,
+	      struct xdp_buff *xdp)
+{
+	struct hns3_desc_cb *desc_cb = ring->desc_cb;
+	dma_addr_t dma_addr = desc_cb->dma;
+	struct xdp_frame *xdpf;
+	int ret = 0;
+
+	xdpf = xdp_convert_buff_to_frame(xdp);
+	if (unlikely(!xdpf))
+		return -ENOMEM;
+
+	dma_sync_single_for_device(ring_to_dev(ring), dma_addr, xdpf->len,
+				   DMA_BIDIRECTIONAL);
+
+	ret = hns3_xdp_xmit_frame(tx_ring, xdpf, dma_addr);
+
+	return ret;
+}
+
+/**
+ * hns3_xdp_xmit - submit @n XDP packets for transmission
+ * @netdev: net device on which frames need to be x'mted
+ * @n: number of XDP frames to be transmitted
+ * @frames: XDP frames to be transmitted
+ * @flags: transmit flags
+ *
+ * Returns number of frames successfully transmited, frames that got
+ * dropped are freed/returned via xdp_return_frame() etc.
+ * For error cases, a negative errno code is returned and no-frames
+ * are xmit'ed and caller must free the frames.
+ */
+int hns3_xdp_xmit(struct net_device *netdev, int n, struct xdp_frame **frames, u32 flags)
+{
+	struct hnae3_handle *h = hns3_get_handle(netdev);
+	struct hns3_nic_priv * priv = netdev_priv(netdev);
+	struct hns3_enet_ring *xdp_ring;
+	unsigned int queue_index;
+	dma_addr_t dma_addr;
+	int drops = 0, i, ret;
+
+	if (test_bit(HNS3_NIC_STATE_DOWN, &priv->state))
+		return -ENETDOWN;
+
+	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
+		return -EINVAL;
+
+	/* TODO: Bad! This does not preserves QoS as of now. we need to do better
+	 * than this later. will come back later.
+	 */
+	queue_index = smp_processor_id() % h->kinfo.num_tqps;
+	xdp_ring = &priv->xdp_rings[queue_index];
+
+	for (i = 0; i < n; i++) {
+		struct xdp_frame *xdpf = frames[i];
+
+		dma_addr = dma_map_single(ring_to_dev(xdp_ring),  xdpf->data,
+					xdpf->len, DMA_TO_DEVICE);
+		if (unlikely(dma_mapping_error(ring_to_dev(xdp_ring), dma_addr))) {
+			xdp_return_frame_rx_napi(xdpf);
+			drops++;
+			continue;
+		}
+
+		ret = hns3_xdp_xmit_frame(xdp_ring, xdpf, dma_addr);
+		if (ret) {
+			dma_unmap_single(ring_to_dev(xdp_ring), dma_addr,
+					 xdpf->len, DMA_TO_DEVICE);
+			xdp_return_frame_rx_napi(xdpf);
+			drops++;
+		}
+	}
+
+	if (flags & XDP_XMIT_FLUSH)
+		hns3_tx_doorbell(xdp_ring->xdp_tx_ring, n - drops, true);
+
+	return n - drops;
+}
+
 static int
 hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 {
+	struct hns3_enet_ring *xdp_ring = rx_ring->xdp_tx_ring;
 	struct bpf_prog *xdp_prog;
 	int ret = HNS3_XDP_PASS;
 	u32 act;
@@ -177,10 +311,54 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 		break;
 	case XDP_TX:
 		/* transmit the buffer on the XDP TX queue */
-		return true;
+		ret = hns3_xdp_tx(xdp_ring, rx_ring, xdp);
+		if (ret) {
+			u64_stats_update_begin(&xdp_ring->syncp);
+			xdp_ring->stats.xdp_rx_bounce_err++;
+			u64_stats_update_end(&xdp_ring->syncp);
+			break;
+		}
+
+		/*
+		 * TODO: PERF: need to check the performance impact of these
+		 * statistics later and then decide whether to keep them
+		 */
+		u64_stats_update_begin(&xdp_ring->syncp);
+		xdp_ring->stats.xdp_rx_bounce++;
+		u64_stats_update_end(&xdp_ring->syncp);
+
+		__set_bit(HNS3_XDP_TX, rx_ring->xdp_flags);
+		ret = HNS3_XDP_TX;
+		break;
 	case XDP_REDIRECT:
+		/*
+		 * TODO: do we need to unmap the buffer now? as it might go
+		 * to different device so DMA mappings need to be destroyed
+		 * and recreated for that target device during xmit there.
+		 * Intel's ICE driver is buggy here!!
+		 *
+		 * Miles to go before I sleep..miles to go before I sleep!
+		 */
 		/* redirect the buffer to other device TX queue */
-		return true;
+		ret = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
+		if (ret) {
+			u64_stats_update_begin(&xdp_ring->syncp);
+			xdp_ring->stats.xdp_rx_redir_err++;
+			u64_stats_update_end(&xdp_ring->syncp);
+			break;
+		}
+
+		/*
+		 * TODO: PERF: need to check the performance impact of these
+		 * statistics later and then decide whether to keep them
+		 */
+		u64_stats_update_begin(&xdp_ring->syncp);
+		xdp_ring->stats.xdp_rx_redir++;
+		u64_stats_update_end(&xdp_ring->syncp);
+
+		__set_bit(HNS3_XDP_REDIRECT, rx_ring->xdp_flags);
+		ret = HNS3_XDP_REDIRECT;
+		break;
 	default:
 		bpf_warn_invalid_xdp_action(act);
 		fallthrough;
@@ -290,11 +468,14 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	ret = hns3_xdp_run(ring, &xdp);
 	/* handle XDP tx, redirect and drop verdicts */
 	if (ret) {
-		/* XDP_REDIRECT && XDP_TX handling to be added here */
+		if (ret & (HNS3_XDP_TX | HNS3_XDP_REDIRECT)) {
+			hns3_xdp_adjust_page_offset(desc_cb);
+		} else {
 		if (ret & HNS3_XDP_DROP)
 			ret = 0;
 		/* drop and error case of xdp run */
 		desc_cb->pagecnt_bias++;
+		}
 
 		hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
 

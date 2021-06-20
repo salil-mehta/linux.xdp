@@ -44,6 +44,7 @@ static const struct hns3_stats hns3_txq_stats[] = {
 	HNS3_TQP_STAT("l4_proto_err", tx_l4_proto_err),
 	HNS3_TQP_STAT("l2l3l4_err", tx_l2l3l4_err),
 	HNS3_TQP_STAT("tso_err", tx_tso_err),
+	HNS3_TQP_STAT("xdp_tx_pkts", xdp_tx_pkts),
 };
 
 #define HNS3_TXQ_STATS_COUNT ARRAY_SIZE(hns3_txq_stats)
@@ -66,6 +67,10 @@ static const struct hns3_stats hns3_rxq_stats[] = {
 	HNS3_TQP_STAT("xdp_pass", xdp_rx_pass),
 	HNS3_TQP_STAT("xdp_drop", xdp_rx_drop),
 	HNS3_TQP_STAT("xdp_drop_rate", xdp_rx_drop_rate),
+	HNS3_TQP_STAT("xdp_bounce", xdp_rx_bounce),
+	HNS3_TQP_STAT("xdp_bounce_err", xdp_rx_bounce_err),
+	HNS3_TQP_STAT("xdp_redirect", xdp_rx_redir),
+	HNS3_TQP_STAT("xdp_redirect_err", xdp_rx_redir_err),
 };
 
 #define HNS3_PRIV_FLAGS_LEN ARRAY_SIZE(hns3_priv_flags)
