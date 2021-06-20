@@ -63,6 +63,9 @@ static const struct hns3_stats hns3_rxq_stats[] = {
 	HNS3_TQP_STAT("csum_complete", csum_complete),
 	HNS3_TQP_STAT("multicast", rx_multicast),
 	HNS3_TQP_STAT("non_reuse_pg", non_reuse_pg),
+	HNS3_TQP_STAT("xdp_pass", xdp_rx_pass),
+	HNS3_TQP_STAT("xdp_drop", xdp_rx_drop),
+	HNS3_TQP_STAT("xdp_drop_rate", xdp_rx_drop_rate),
 };
 
 #define HNS3_PRIV_FLAGS_LEN ARRAY_SIZE(hns3_priv_flags)

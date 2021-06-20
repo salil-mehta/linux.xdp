@@ -36,12 +36,6 @@
 #define hns3_set_field(origin, shift, val)	((origin) |= (val) << (shift))
 #define hns3_tx_bd_count(S)	DIV_ROUND_UP(S, HNS3_MAX_BD_SIZE)
 
-#define hns3_rl_err(fmt, ...)						\
-	do {								\
-		if (net_ratelimit())					\
-			netdev_err(fmt, ##__VA_ARGS__);			\
-	} while (0)
-
 static void hns3_clear_all_ring(struct hnae3_handle *h, bool force);
 
 static const char hns3_driver_name[] = "hns3";
@@ -2543,6 +2537,7 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 	if (!p)
 		return -ENOMEM;
 
+	cb->ring = ring;
 	cb->priv = p;
 	cb->page_offset = 0;
 	cb->reuse_flag = 0;
@@ -2550,11 +2545,11 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 	cb->length = hns3_page_size(ring);
 	cb->type = DESC_TYPE_PAGE;
 	page_ref_add(p, USHRT_MAX - 1);
-	cb->pagecnt_bias = USHRT_MAX;
+	cb->pagecnt_bias = USHRT_MAX - 1;
 	if (hns3_is_xdp_enabled(ring->netdev))
 		cb->rx_headroom = hns3_rx_headroom(ring->netdev);
 	else
-		cb->rx_headroom = 0;
+		cb->rx_headroom = 0; /* TODO: this is not right in hns3 */
 
 	return 0;
 }
@@ -2801,7 +2796,7 @@ void hns3_clean_tx_ring(struct hns3_enet_ring *ring, int budget)
 	}
 }
 
-static int hns3_desc_unused(struct hns3_enet_ring *ring)
+int hns3_desc_unused(struct hns3_enet_ring *ring)
 {
 	int ntc = ring->next_to_clean;
 	int ntu = ring->next_to_use;
@@ -3089,7 +3084,7 @@ static bool hns3_parse_vlan_tag(struct hns3_enet_ring *ring,
 	}
 }
 
-static void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring)
+void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring)
 {
 	ring->desc[ring->next_to_clean].rx.bd_base_info &=
 		cpu_to_le32(~BIT(HNS3_RXD_VLD_B));
@@ -3216,8 +3211,8 @@ static int hns3_set_gro_and_checksum(struct hns3_enet_ring *ring,
 	skb_shinfo(skb)->gso_size = hnae3_get_field(bd_base_info,
 						    HNS3_RXD_GRO_SIZE_M,
 						    HNS3_RXD_GRO_SIZE_S);
-	/* if there is no HW GRO, do not set gro params */
-	if (!skb_shinfo(skb)->gso_size) {
+	/* if there is no HW GRO or XDP is enabled, do not set gro params */
+	if ((!skb_shinfo(skb)->gso_size) || hns3_is_xdp_enabled(ring->netdev)) {
 		hns3_rx_checksum(ring, skb, l234info, bd_base_info, ol_info);
 		return 0;
 	}
@@ -3251,7 +3246,7 @@ static void hns3_set_rx_skb_rss_type(struct hns3_enet_ring *ring,
 	skb_set_hash(skb, rss_hash, rss_type);
 }
 
-static int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb)
+int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb)
 {
 	struct net_device *netdev = ring_to_netdev(ring);
 	enum hns3_pkt_l2t_type l2_frame_type;
@@ -3420,12 +3415,23 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 		}
 
 		/* Poll one pkt */
-		err = hns3_handle_rx_bd(ring);
+		if (hns3_is_xdp_enabled(ring->netdev)) {
+			err = hns3_xdp_handle_rx_bd(ring);
+			if (!ring->skb || unlikely(err))
+				goto out;
+		} else {
+			err = hns3_handle_rx_bd(ring);
 		/* Do not get FE for the packet or failed to alloc skb */
-		if (unlikely(!ring->skb || err == -ENXIO)) {
+			if (unlikely(!ring->skb || err == -ENXIO)) {
 			goto out;
-		} else if (likely(!err)) {
+			}
+		}
+
+		/* pass 'skb' to stack */
+		if (likely(!err)) {
+			if (ring->skb) {
 			rx_fn(ring, ring->skb);
+			}
 			recv_pkts++;
 		}
 

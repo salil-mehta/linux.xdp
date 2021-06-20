@@ -32,6 +32,19 @@ bool hns3_xdp_check_max_mtu(struct net_device *netdev)
 	return netdev->mtu <= hns3_xdp_max_mtu(netdev) ;
 }
 
+static u32 hns3_xdp_rx_frame_size(struct hns3_enet_ring *ring)
+{
+	unsigned int frame_size;
+
+	/*
+	 * TODO: Do we need different handling for pages >= 8K?
+	 * Need to properly done during perfromance
+	 */
+	frame_size = hns3_page_size(ring) / 2;
+
+	return frame_size;
+}
+
 static int hns3_xdp_check(struct net_device *netdev, struct bpf_prog *prog)
 {
 	struct hns3_nic_priv *priv = netdev_priv(netdev);
@@ -49,6 +62,275 @@ static int hns3_xdp_check(struct net_device *netdev, struct bpf_prog *prog)
 			      "For now, XDP is not supported with MTU exceeding %d\n",
 			       hns3_xdp_max_mtu(netdev));
 		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void
+hns3_xdp_adjust_page_offset(struct hns3_desc_cb *cb)
+{
+	unsigned int frame_size = hns3_xdp_rx_frame_size(cb->ring);
+
+	/*
+	 * TODO: Need to add proper page reuse handling for page size >= 8k
+	 */
+	/* flip to unused part of the page */
+	cb->page_offset ^= frame_size;
+}
+
+static bool hns3_xdp_can_reuse_page(struct hns3_desc_cb *cb)
+{
+	struct page *page = (struct page *)cb->priv;
+	u16 pagecnt_bias = cb->pagecnt_bias;
+
+	/* distant node and pfmemalloc pages should not be reused */
+	if (!dev_page_is_reusable(page))
+		return false;
+
+	/* check if stack is using the other part of the page */
+	/*
+	 * TODO: Later check race reported by 'Bjorn Topel' for ICE driver - it's buggy!
+	 * i.e. need a fix better than that this for XDP in hns3 driver
+	 * Link: https://lore.kernel.org/netdev/20200825172736.27318-4-bjorn.topel@gmail.com/
+	 * Since we are not testing 'xdp_do_redirect/xdp_tx' therefore we are
+	 * okay without above fix for now.
+	 *
+	 * Eventually we want to get over this and use page-pool frag reuse as
+	 * that totally eliminates above race condition (I think)
+	 */
+	/*
+	 * TODO: Need to add proper page reuse handling for page size >= 8k
+	 */
+	if ((unlikely(page_count(page) - pagecnt_bias) > 1))
+		return false;
+
+	if (unlikely(pagecnt_bias == 1)) {
+		page_ref_add(page, USHRT_MAX - 1);
+		cb->pagecnt_bias = USHRT_MAX;
+	}
+
+	return true;
+}
+
+static struct sk_buff *
+hns3_build_skb(struct hns3_enet_ring *ring, struct xdp_buff *xdp)
+{
+	struct hns3_desc_cb *desc_cb = &ring->desc_cb[ring->next_to_clean];
+	struct net_device *netdev = ring_to_netdev(ring);
+	u8 metasize = xdp->data - xdp->data_meta;
+	u32 truesize = hns3_xdp_rx_frame_size(ring);
+	struct sk_buff *skb;
+
+	net_prefetch(xdp->data_meta);
+
+	skb = ring->skb = build_skb(xdp->data_hard_start, truesize);
+	if (unlikely(!skb)) {
+		hns3_rl_err(netdev, "failed to build skb from xdp buffer\n");
+
+		u64_stats_update_begin(&ring->syncp);
+		ring->stats.sw_err_cnt++;
+		u64_stats_update_end(&ring->syncp);
+
+		return ERR_PTR(-ENOMEM);
+	}
+
+	ring->pending_buf = 1;
+
+	skb_reserve(skb, xdp->data - xdp->data_hard_start);
+	skb_put(skb, xdp->data_end - xdp->data);
+
+	/* TODO: once we support XDP Hints this would be useful */
+	if (metasize)
+		skb_metadata_set(skb, metasize);
+
+	skb_record_rx_queue(skb, ring->tqp->tqp_index);
+
+	u64_stats_update_begin(&ring->syncp);
+	ring->stats.seg_pkt_cnt++;
+	u64_stats_update_end(&ring->syncp);
+
+	hns3_xdp_adjust_page_offset(desc_cb);
+	hns3_rx_ring_move_fw(ring);
+
+	return skb;
+}
+
+static int
+hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
+{
+	struct bpf_prog *xdp_prog;
+	int ret = HNS3_XDP_PASS;
+	u32 act;
+
+	/* RFC Question: should we? Any security risk in this action? */
+	/* Pass the buffer to stack if we cannot get hold of xdp prog */
+	rcu_read_lock();
+	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
+	if (!xdp_prog)
+		goto exit_unlock;
+
+	act = bpf_prog_run_xdp(xdp_prog, xdp);
+	switch (act) {
+	case XDP_PASS:
+		/* return and continue with normal SKB path */
+		break;
+	case XDP_TX:
+		/* transmit the buffer on the XDP TX queue */
+		return true;
+	case XDP_REDIRECT:
+		/* redirect the buffer to other device TX queue */
+		return true;
+	default:
+		bpf_warn_invalid_xdp_action(act);
+		fallthrough;
+	case XDP_ABORTED:
+		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
+		fallthrough;
+	case XDP_DROP:
+		u64_stats_update_begin(&rx_ring->syncp);
+		rx_ring->stats.xdp_rx_drop++;
+		u64_stats_update_end(&rx_ring->syncp);
+
+		ret = HNS3_XDP_DROP;
+		break;
+	}
+
+exit_unlock:
+	rcu_read_unlock();
+	return ret;
+}
+
+/**
+ * hns3_reuse_or_relinquish_page - check if the page can be reused by the driver
+ * or it should unmap the page and relinquish. Later means updating the page count
+ * with the unbiased page count(i.e. page count - page count bias) and let the
+ * stack or the xdp redirect or the xdp tx do the work of free'ing the page
+ * eventually which is akin to the unbiased approach (kind of fallback path).
+ * (With this trick, we have deferred the atomic update of the page count as
+ * long as possible and acheived the page reuse)
+ *
+ * @ring: ring to which the page belongs.
+ * @cb: Buffer descriptor common block of the ring to which the page belongs.
+ *
+ */
+static void
+hns3_xdp_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
+				  struct hns3_desc_cb *cb)
+{
+	if (hns3_xdp_can_reuse_page(cb)) {
+		/* mark it for reuse in the RX buffer allocation later */
+		cb->reuse_flag = 1;
+	} else {
+		/*
+		 * we are not reusing the page so unmap it. This should be done
+		 * irrespective of the fact whether we are eventually free'ing
+		 * the page or not.
+		 */
+		dma_unmap_page_attrs(ring->dev, cb->dma,
+				     hns3_xdp_rx_frame_size(ring),
+				     DMA_FROM_DEVICE,
+				     DMA_ATTR_SKIP_CPU_SYNC);
+		/*
+		 * update the page reference with the unbiased count. This
+		 * might not result in free'ing of the page being relinquished.
+		 * Driver is just falling back to the old unbiased page release
+		 * mechanism.
+		 */
+		__page_frag_cache_drain(cb->priv, cb->pagecnt_bias);
+	}
+}
+
+int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
+{
+	u32 frame_size, frag_size, bd_base_info;
+	struct sk_buff *skb = ring->skb;
+	struct hns3_desc_cb *desc_cb;
+	void *data, *data_hard_start;
+	struct hns3_desc *desc;
+	struct xdp_buff xdp;
+	int length, ret;
+
+	desc = &ring->desc[ring->next_to_clean];
+	desc_cb = &ring->desc_cb[ring->next_to_clean];
+
+	/* prefetch the descriptor */
+	prefetch(desc);
+
+	bd_base_info = le32_to_cpu(desc->rx.bd_base_info);
+	/* Check valid BD */
+	if (unlikely(!(bd_base_info & BIT(HNS3_RXD_VLD_B))))
+		return -ENXIO;
+
+	dma_rmb();
+
+	length = le16_to_cpu(desc->rx.size);
+	ring->va = desc_cb->buf + desc_cb->page_offset;
+	data_hard_start = ring->va;
+	data = ring->va + desc_cb->rx_headroom;
+	frag_size = hns3_buf_size(ring); /* should we be more precise here? */
+	frame_size = hns3_xdp_rx_frame_size(ring);
+
+	dma_sync_single_for_cpu(ring_to_dev(ring),
+			desc_cb->dma + desc_cb->page_offset,
+			frag_size,
+			DMA_FROM_DEVICE);
+
+	desc_cb->pagecnt_bias--;
+
+	/* Prefetch first two cache line of the xdp frame data */
+	net_prefetch(data_hard_start);
+	net_prefetch(data);
+
+	xdp_init_buff(&xdp, frame_size, &ring->xdp_rxq);
+	xdp_prepare_buff(&xdp, data_hard_start, desc_cb->rx_headroom,
+			 length, true);
+
+	/* run xdp program */
+	ret = hns3_xdp_run(ring, &xdp);
+	/* handle XDP tx, redirect and drop verdicts */
+	if (ret) {
+		/* XDP_REDIRECT && XDP_TX handling to be added here */
+		if (ret & HNS3_XDP_DROP)
+			ret = 0;
+		/* drop and error case of xdp run */
+		desc_cb->pagecnt_bias++;
+
+		hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
+
+		return ret;
+	}
+
+	/* build skb and pass it to stack */
+	/*
+	 * TODO: We are not handling multi-buffer in XDP. We will enable it later
+	 * Link: https://lore.kernel.org/bpf/cover.1642758637.git.lorenzo@kernel.org/
+	 *
+	 * Hence, 'HW GRO=disabled' and 'MTU <= 4k' is a requirement for now.
+	 */
+	skb = hns3_build_skb(ring, &xdp);
+	if (IS_ERR(skb)) {
+		/*
+		 * page (offset, reuse} are still the old one. Do we have to
+		 * release the page/buffer in this case (I think no?)
+		 */
+		desc_cb->pagecnt_bias++;
+		return -ENOMEM;
+	}
+	ring->skb = skb;
+
+	hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
+
+	/*
+	 * we dont support multi buffer xdp. This is pathological check.
+	 */
+	if (!(bd_base_info & BIT(HNS3_RXD_FE_B)))
+		netdev_warn(ring_to_netdev(ring), "something is wrong! not a last xdp frag\n");
+
+	ret = hns3_handle_bdinfo(ring, skb);
+	if (unlikely(ret)) {
+		dev_kfree_skb_any(skb);
+		return ret;
 	}
 
 	return 0;

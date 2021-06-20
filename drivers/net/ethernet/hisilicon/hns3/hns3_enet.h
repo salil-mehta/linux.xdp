@@ -294,6 +294,7 @@ struct __packed hns3_desc {
 };
 
 struct hns3_desc_cb {
+	struct hns3_enet_ring *ring;
 	dma_addr_t dma; /* dma address of this desc */
 	void *buf;      /* cpu addr for a desc */
 	int dma_dir;
@@ -392,6 +393,10 @@ struct ring_stats {
 			u64 csum_complete;
 			u64 rx_multicast;
 			u64 non_reuse_pg;
+			u64 xdp_rx_pkts;
+			u64 xdp_rx_pass;
+			u64 xdp_rx_drop;
+			u64 xdp_rx_drop_rate;
 		};
 	};
 };
@@ -433,7 +438,8 @@ struct hns3_enet_ring {
 	struct sk_buff *tail_skb;
 
 	/* XDP related fields */
-	struct bpf_prog *xdp_prog;
+	DECLARE_BITMAP(xdp_flags, 8);
+	struct bpf_prog __rcu *xdp_prog;
 	struct xdp_rxq_info xdp_rxq;
 	struct hns3_enet_ring *xdp_tx_ring;
 } ____cacheline_internodealigned_in_smp;
@@ -611,6 +617,12 @@ static inline unsigned int hns3_page_order(struct hns3_enet_ring *ring)
 #define hns3_rl_usec_to_reg(int_rl) ((int_rl) >> 2)
 #define hns3_rl_round_down(int_rl) round_down(int_rl, 4)
 
+#define hns3_rl_err(fmt, ...)						\
+	do {								\
+		if (net_ratelimit())					\
+			netdev_err(fmt, ##__VA_ARGS__);			\
+	} while (0)
+
 void hns3_ethtool_set_ops(struct net_device *netdev);
 int hns3_set_channels(struct net_device *netdev,
 		      struct ethtool_channels *ch);
@@ -624,6 +636,9 @@ bool hns3_is_phys_func(struct pci_dev *pdev);
 int hns3_clean_rx_ring(
 		struct hns3_enet_ring *ring, int budget,
 		void (*rx_fn)(struct hns3_enet_ring *, struct sk_buff *));
+void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring);
+int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb);
+int hns3_desc_unused(struct hns3_enet_ring *ring);
 
 void hns3_set_vector_coalesce_rx_gl(struct hns3_enet_tqp_vector *tqp_vector,
 				    u32 gl_value);
