@@ -1667,10 +1667,15 @@ static int hns3_nic_set_features(struct net_device *netdev,
 	int ret;
 
 	if (changed & (NETIF_F_GRO_HW) && h->ae_algo->ops->set_gro_en) {
+		netdev_warn(netdev,"trying TO configure GRO when XDP is enabled\n");
 		enable = !!(features & NETIF_F_GRO_HW);
-		ret = h->ae_algo->ops->set_gro_en(h, enable);
-		if (ret)
-			return ret;
+		if (enable && hns3_is_xdp_enabled(netdev)) {
+			netdev_warn(netdev,"cannot configure GRO when XDP is enabled\n");
+		} else {
+			ret = h->ae_algo->ops->set_gro_en(h, enable);
+			if (ret)
+				return ret;
+		}
 	}
 
 	if ((changed & NETIF_F_HW_VLAN_CTAG_RX) &&
@@ -2475,8 +2480,10 @@ static void hns3_set_default_feature(struct net_device *netdev)
 		NETIF_F_SCTP_CRC | NETIF_F_FRAGLIST;
 
 	if (ae_dev->dev_version >= HNAE3_DEVICE_VERSION_V2) {
-		netdev->hw_features |= NETIF_F_GRO_HW;
-		netdev->features |= NETIF_F_GRO_HW;
+		if (!hns3_is_xdp_enabled(netdev)) {
+			netdev->hw_features |= NETIF_F_GRO_HW;
+			netdev->features |= NETIF_F_GRO_HW;
+		}
 
 		if (!(h->flags & HNAE3_SUPPORT_VF)) {
 			netdev->hw_features |= NETIF_F_NTUPLE;
