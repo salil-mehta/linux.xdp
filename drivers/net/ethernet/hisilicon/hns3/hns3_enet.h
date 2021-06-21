@@ -296,6 +296,7 @@ struct __packed hns3_desc {
 struct hns3_desc_cb {
 	dma_addr_t dma; /* dma address of this desc */
 	void *buf;      /* cpu addr for a desc */
+	int dma_dir;
 
 	/* priv data for the desc, e.g. skb when use with ip stack */
 	void *priv;

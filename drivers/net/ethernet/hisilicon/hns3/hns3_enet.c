@@ -2523,6 +2523,16 @@ static void hns3_set_default_feature(struct net_device *netdev)
 	}
 }
 
+int hns3_ring_to_dma_dir(struct hns3_enet_ring *ring)
+{
+	if (hns3_is_xdp_enabled(ring_to_netdev(ring)))
+		return DMA_BIDIRECTIONAL;
+	else if (HNAE3_IS_TX_RING(ring))
+		return DMA_TO_DEVICE;
+	else
+		return DMA_FROM_DEVICE;
+}
+
 static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 			     struct hns3_desc_cb *cb)
 {
@@ -2541,6 +2551,10 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 	cb->type = DESC_TYPE_PAGE;
 	page_ref_add(p, USHRT_MAX - 1);
 	cb->pagecnt_bias = USHRT_MAX;
+	if (hns3_is_xdp_enabled(ring->netdev))
+		cb->rx_headroom = hns3_rx_headroom(ring->netdev);
+	else
+		cb->rx_headroom = 0;
 
 	return 0;
 }
@@ -2557,8 +2571,9 @@ static void hns3_free_buffer(struct hns3_enet_ring *ring,
 
 static int hns3_map_buffer(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
 {
+	cb->dma_dir = hns3_ring_to_dma_dir(ring);
 	cb->dma = dma_map_page(ring_to_dev(ring), cb->priv, 0,
-			       cb->length, ring_to_dma_dir(ring));
+			       cb->length, cb->dma_dir);
 
 	if (unlikely(dma_mapping_error(ring_to_dev(ring), cb->dma)))
 		return -EIO;
@@ -2571,10 +2586,10 @@ static void hns3_unmap_buffer(struct hns3_enet_ring *ring,
 {
 	if (cb->type == DESC_TYPE_SKB || cb->type == DESC_TYPE_FRAGLIST_SKB)
 		dma_unmap_single(ring_to_dev(ring), cb->dma, cb->length,
-				 ring_to_dma_dir(ring));
+				 cb->dma_dir);
 	else if (cb->length)
 		dma_unmap_page(ring_to_dev(ring), cb->dma, cb->length,
-			       ring_to_dma_dir(ring));
+			                 cb->dma_dir);
 }
 
 static void hns3_buffer_detach(struct hns3_enet_ring *ring, int i)
