@@ -135,6 +135,24 @@ config HNS3_ENET
 	  family of SoCs. This module depends upon HNAE3 driver to access the HNAE3
 	  devices and their associated operations.
 
+config HNS3_XDP
+	bool "Hisilicon HNS3 XDP(eXpress Data Path) Support"
+	default y
+	depends on HNS3_HCLGE && HNS3_ENET
+	help
+	  Say Y here if you want to use XDP(eXpress Data Path) in the HNS3 driver.
+
+	  If unsure, say N.
+
+config HNS3_XSK
+	bool "Hisilicon HNS3 AF_XDP Support"
+	default n
+	depends on HNS3_HCLGE && HNS3_ENET && HNS3_XDP
+	help
+	  Say Y here if you want to enable AF_XDP i.e. XDP user-space sockets
+          support in the HNS3 driver.
+
+	  If unsure, say N.
 endif #HNS3
 
 endif # NET_VENDOR_HISILICON
