@@ -25,6 +25,7 @@
 
 #include "hnae3.h"
 #include "hns3_enet.h"
+#include "hns3_xdp.h"
 /* All hns3 tracepoints are defined by the include below, which
  * must be included exactly once across the whole kernel with
  * CREATE_TRACE_POINTS defined
@@ -2193,6 +2194,7 @@ static const struct net_device_ops hns3_nic_netdev_ops = {
 	.ndo_set_vf_link_state	= hns3_nic_set_vf_link_state,
 	.ndo_set_vf_rate	= hns3_nic_set_vf_rate,
 	.ndo_set_vf_mac		= hns3_nic_set_vf_mac,
+	.ndo_bpf 		= hns3_xdp,
 };
 
 bool hns3_is_phys_func(struct pci_dev *pdev)
