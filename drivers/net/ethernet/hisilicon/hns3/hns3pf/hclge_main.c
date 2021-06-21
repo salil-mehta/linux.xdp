@@ -888,6 +888,13 @@ static int hclge_query_pf_resource(struct hclge_dev *hdev)
 	req = (struct hclge_pf_res_cmd *)desc.data;
 	hdev->num_tqps = le16_to_cpu(req->tqp_num) +
 			 le16_to_cpu(req->ext_tqp_num);
+
+	if (hdev->num_tqps%2) {
+		dev_warn(&hdev->pdev->dev,  "Rounding received TPQs(=%d) to the powers of 2\n",
+			hdev->num_tqps);
+		hdev->num_tqps -= 1;
+	}
+
 	hdev->pkt_buf_size = le16_to_cpu(req->buf_size) << HCLGE_BUF_UNIT_S;
 
 	if (req->tx_buf_size)
