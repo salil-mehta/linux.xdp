@@ -2871,7 +2871,8 @@ static void hns3_nic_reuse_page(struct sk_buff *skb, int i,
 	 * unreuse
 	 */
 	if (!dev_page_is_reusable(desc_cb->priv) ||
-	    (!desc_cb->page_offset && !hns3_can_reuse_page(desc_cb))) {
+	    (!desc_cb->page_offset && !hns3_can_reuse_page(desc_cb)) ||
+	    hns3_is_xdp_enabled(ring->netdev)) {
 		__page_frag_cache_drain(desc_cb->priv, desc_cb->pagecnt_bias);
 		return;
 	}
@@ -3128,7 +3129,7 @@ static int hns3_alloc_skb(struct hns3_enet_ring *ring, unsigned int length,
 		memcpy(__skb_put(skb, length), va, ALIGN(length, sizeof(long)));
 
 		/* We can reuse buffer as-is, just make sure it is reusable */
-		if (dev_page_is_reusable(desc_cb->priv))
+		if (dev_page_is_reusable(desc_cb->priv) && !hns3_is_xdp_enabled(ring->netdev))
 			desc_cb->reuse_flag = 1;
 		else /* This page cannot be reused so discard it */
 			__page_frag_cache_drain(desc_cb->priv,
