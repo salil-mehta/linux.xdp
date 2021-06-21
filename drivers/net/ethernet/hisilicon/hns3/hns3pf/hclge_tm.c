@@ -635,6 +635,7 @@ static void hclge_tm_vport_tc_info_update(struct hclge_vport *vport)
 {
 	struct hnae3_knic_private_info *kinfo = &vport->nic.kinfo;
 	struct hclge_dev *hdev = vport->back;
+	u16 pf_qs_num = HNAE3_MAX_TC;
 	u16 vport_max_rss_size;
 	u16 max_rss_size;
 	u8 i;
@@ -644,13 +645,15 @@ static void hclge_tm_vport_tc_info_update(struct hclge_vport *vport)
 	 */
 	if (vport->vport_id) {
 		kinfo->tc_info.num_tc = 1;
-		vport->qs_offset = HNAE3_MAX_TC +
-				   vport->vport_id - HCLGE_VF_VPORT_START_NUM;
+		/* add count for XDP TXQ traffic class which should mirror TC mode RSS */
+		vport->qs_offset = 2*pf_qs_num + vport->vport_id - HCLGE_VF_VPORT_START_NUM;
+		vport->xdp_qs_offset = 0;
 		vport_max_rss_size = hdev->vf_rss_size_max;
 	} else {
 		kinfo->tc_info.num_tc =
 			min_t(u16, vport->alloc_tqps, hdev->tm_info.num_tc);
 		vport->qs_offset = 0;
+		vport->xdp_qs_offset = pf_qs_num;
 		vport_max_rss_size = hdev->pf_rss_size_max;
 	}
 
@@ -907,6 +910,7 @@ static int hclge_vport_q_to_qs_map(struct hclge_dev *hdev,
 {
 	struct hnae3_knic_private_info *kinfo = &vport->nic.kinfo;
 	struct hnae3_tc_info *tc_info = &kinfo->tc_info;
+	struct device *dev = &hdev->pdev->dev;
 	struct hnae3_queue **tqp = kinfo->tqp;
 	u32 i, j;
 	int ret;
@@ -920,6 +924,21 @@ static int hclge_vport_q_to_qs_map(struct hclge_dev *hdev,
 						       vport->qs_offset + i);
 			if (ret)
 				return ret;
+
+			if (vport->vport_id)
+				continue;
+
+			/* set XDP Q to Qset mapping for PF */
+			q = tqp[ kinfo->num_tqps + tc_info->tqp_offset[i] + j];
+
+			ret = hclge_tm_q_to_qs_map_cfg(hdev,
+						       hclge_get_queue_id(q),
+						       vport->xdp_qs_offset + i);
+			if (ret) {
+				dev_err(dev, "failed to set XDP Q(=%d) to Qset(=%d) mapping\n",
+				               hclge_get_queue_id(q), vport->xdp_qs_offset + i);
+				return ret;
+			}
 		}
 	}
 
@@ -928,6 +947,7 @@ static int hclge_vport_q_to_qs_map(struct hclge_dev *hdev,
 
 static int hclge_tm_pri_q_qs_cfg(struct hclge_dev *hdev)
 {
+	struct device *dev = &hdev->pdev->dev;
 	struct hclge_vport *vport = hdev->vport;
 	int ret;
 	u32 i, k;
@@ -943,6 +963,18 @@ static int hclge_tm_pri_q_qs_cfg(struct hclge_dev *hdev)
 					hdev, vport[k].qs_offset + i, i);
 				if (ret)
 					return ret;
+
+				if (vport->vport_id)
+					continue;
+
+				/* set Qset to Pri mapping for XDP Qsets for PF */
+				ret = hclge_tm_qs_to_pri_map_cfg(
+					hdev, vport[k].xdp_qs_offset + i, i);
+				if (ret) {
+					dev_err(dev, "failed to set XDP QSet(=%d) to Pri(=%d) mapping\n",
+					               vport[k].xdp_qs_offset + i, i);
+					return ret;
+				}
 			}
 		}
 	} else if (hdev->tx_sch_mode == HCLGE_FLAG_VNET_BASE_SCH_MODE) {
@@ -953,6 +985,18 @@ static int hclge_tm_pri_q_qs_cfg(struct hclge_dev *hdev)
 					hdev, vport[k].qs_offset + i, k);
 				if (ret)
 					return ret;
+
+				if (vport->vport_id)
+					continue;
+
+				/* set Qset to Pri mapping for XDP Qsets for PF */
+				ret = hclge_tm_qs_to_pri_map_cfg(
+					hdev, vport[k].xdp_qs_offset + i, i);
+				if (ret) {
+					dev_err(dev, "failed to set XDP QSet(=%d) to Pri(=%d) mapping\n",
+					               vport[k].xdp_qs_offset + i, i);
+					return ret;
+				}
 			}
 	} else {
 		return -EINVAL;
