@@ -3872,25 +3872,16 @@ static void hns3_nic_dealloc_vector_data(struct hns3_nic_priv *priv)
 	devm_kfree(&pdev->dev, priv->tqp_vector);
 }
 
-static void hns3_ring_get_cfg(struct hnae3_queue *q, struct hns3_nic_priv *priv,
-			      unsigned int ring_type)
+static void hns3_init_ring_defs(struct hns3_nic_priv *priv, struct hns3_enet_ring *ring, struct hnae3_queue *q, u8 type)
 {
-	int queue_num = priv->ae_handle->kinfo.num_tqps;
-	struct hns3_enet_ring *ring;
-	int desc_num;
+	struct hnae3_knic_private_info *kinfo =  &priv->ae_handle->kinfo;
+	u16 desc_num;
 
-	if (ring_type == HNAE3_RING_TYPE_TX) {
-		ring = &priv->ring[q->tqp_index];
-		desc_num = priv->ae_handle->kinfo.num_tx_desc;
-		ring->queue_index = q->tqp_index;
-	} else {
-		ring = &priv->ring[q->tqp_index + queue_num];
-		desc_num = priv->ae_handle->kinfo.num_rx_desc;
-		ring->queue_index = q->tqp_index;
-	}
+	hnae3_set_bit(ring->flag, HNAE3_RING_TYPE_B, type);
+	desc_num = (type == HNAE3_RING_TYPE_TX) ? kinfo->num_tx_desc : kinfo->num_rx_desc;
 
-	hnae3_set_bit(ring->flag, HNAE3_RING_TYPE_B, ring_type);
-
+	ring->netdev = priv->netdev;
+	ring->queue_index = q->tqp_index;
 	ring->tqp = q;
 	ring->desc = NULL;
 	ring->desc_cb = NULL;
@@ -3903,17 +3894,12 @@ static void hns3_ring_get_cfg(struct hnae3_queue *q, struct hns3_nic_priv *priv,
 	ring->last_to_use = 0;
 }
 
-static void hns3_queue_to_ring(struct hnae3_queue *tqp,
-			       struct hns3_nic_priv *priv)
-{
-	hns3_ring_get_cfg(tqp, priv, HNAE3_RING_TYPE_TX);
-	hns3_ring_get_cfg(tqp, priv, HNAE3_RING_TYPE_RX);
-}
-
-static int hns3_get_ring_config(struct hns3_nic_priv *priv)
+static int hns3_alloc_rings(struct hns3_nic_priv *priv)
 {
 	struct hnae3_handle *h = priv->ae_handle;
 	struct pci_dev *pdev = h->pdev;
+	struct hns3_enet_ring *ring,  *rx_ring;
+	struct hnae3_queue *q;
 	int i;
 
 	priv->ring = devm_kzalloc(&pdev->dev,
@@ -3923,13 +3909,22 @@ static int hns3_get_ring_config(struct hns3_nic_priv *priv)
 	if (!priv->ring)
 		return -ENOMEM;
 
-	for (i = 0; i < h->kinfo.num_tqps; i++)
-		hns3_queue_to_ring(h->kinfo.tqp[i], priv);
+	/* initialize ring params to its defaults */
+	for (i = 0; i < h->kinfo.num_tqps; i++) {
+		/* RX/TX rings belong to same TQP */
+		q = h->kinfo.tqp[i];
+		ring = &priv->ring[q->tqp_index];
+		hns3_init_ring_defs(priv, ring, q, HNAE3_RING_TYPE_TX);
+
+		ring = &priv->ring[q->tqp_index + h->kinfo.num_tqps];
+		hns3_init_ring_defs(priv, ring, q, HNAE3_RING_TYPE_RX);
+		rx_ring = ring;
+	}
 
 	return 0;
 }
 
-static void hns3_put_ring_config(struct hns3_nic_priv *priv)
+static void hns3_dealloc_rings(struct hns3_nic_priv *priv)
 {
 	if (!priv->ring)
 		return;
@@ -3956,11 +3951,13 @@ static int hns3_alloc_ring_memory(struct hns3_enet_ring *ring)
 	if (ret)
 		goto out_with_desc_cb;
 
-	if (!HNAE3_IS_TX_RING(ring)) {
-		ret = hns3_alloc_ring_buffers(ring);
-		if (ret)
-			goto out_with_desc;
-	}
+	if (HNAE3_IS_TX_RING(ring))
+		return 0;
+
+	/* pre-alloc buffers  for rx ring */
+	ret = hns3_alloc_ring_buffers(ring);
+	if (ret)
+		goto out_with_desc;
 
 	return 0;
 
@@ -4062,16 +4059,24 @@ static void hns3_init_tx_ring_tc(struct hns3_nic_priv *priv)
 int hns3_init_all_ring(struct hns3_nic_priv *priv)
 {
 	struct hnae3_handle *h = priv->ae_handle;
-	int ring_num = h->kinfo.num_tqps * 2;
-	int i, j;
-	int ret;
+	int ring_num = h->kinfo.num_tqps;
+	int ret, i, j, k = 1;
 
-	for (i = 0; i < ring_num; i++) {
+	for (i = 0; i <  ring_num; i++) {
+		/* alloc tx ring descriptors+buffers */
 		ret = hns3_alloc_ring_memory(&priv->ring[i]);
 		if (ret) {
 			dev_err(priv->dev,
-				"Alloc ring memory fail! ret=%d\n", ret);
-			goto out_when_alloc_ring_memory;
+				"fail(=%d) to alloc tx ring desc/buffs\n", ret);
+			goto err_tx_ring_alloc;
+		}
+
+		/* alloc rx ring descriptors+buffers */
+		ret = hns3_alloc_ring_memory(&priv->ring[i + ring_num]);
+		if (ret) {
+			dev_err(priv->dev,
+				"fail(=%d) to alloc rx ring desc/buffs\n", ret);
+			goto err_rx_ring_alloc;
 		}
 
 		u64_stats_init(&priv->ring[i].syncp);
@@ -4079,8 +4084,13 @@ int hns3_init_all_ring(struct hns3_nic_priv *priv)
 
 	return 0;
 
-out_when_alloc_ring_memory:
-	for (j = i - 1; j >= 0; j--)
+/* roll back all previous allocations */
+err_rx_ring_alloc:
+	for (j = i - k; j >= 0; j--)
+		hns3_fini_ring(&priv->ring[j + ring_num]);
+	k = 0;
+err_tx_ring_alloc:
+	for (j = i - k; j >= 0; j--)
 		hns3_fini_ring(&priv->ring[j]);
 
 	return -ENOMEM;
@@ -4226,7 +4236,7 @@ static int hns3_client_init(struct hnae3_handle *handle)
 	/* Carrier off reporting is important to ethtool even BEFORE open */
 	netif_carrier_off(netdev);
 
-	ret = hns3_get_ring_config(priv);
+	ret = hns3_alloc_rings(priv);
 	if (ret) {
 		ret = -ENOMEM;
 		goto out_get_ring_cfg;
@@ -4311,6 +4321,7 @@ out_init_ring:
 out_init_vector_data:
 	hns3_nic_dealloc_vector_data(priv);
 out_alloc_vector_data:
+	hns3_dealloc_rings(priv);
 	priv->ring = NULL;
 out_get_ring_cfg:
 	priv->ae_handle = NULL;
@@ -4349,7 +4360,7 @@ static void hns3_client_uninit(struct hnae3_handle *handle, bool reset)
 
 	hns3_uninit_all_ring(priv);
 
-	hns3_put_ring_config(priv);
+	hns3_dealloc_rings(priv);
 
 out_netdev_free:
 	hns3_dbg_uninit(handle);
@@ -4580,7 +4591,7 @@ static int hns3_reset_notify_init_enet(struct hnae3_handle *handle)
 	/* Carrier off reporting is important to ethtool even BEFORE open */
 	netif_carrier_off(netdev);
 
-	ret = hns3_get_ring_config(priv);
+	ret = hns3_alloc_rings(priv);
 	if (ret)
 		return ret;
 
@@ -4633,7 +4644,7 @@ err_uninit_vector:
 err_dealloc_vector:
 	hns3_nic_dealloc_vector_data(priv);
 err_put_ring:
-	hns3_put_ring_config(priv);
+	hns3_dealloc_rings(priv);
 
 	return ret;
 }
@@ -4661,7 +4672,7 @@ static int hns3_reset_notify_uninit_enet(struct hnae3_handle *handle)
 
 	hns3_uninit_all_ring(priv);
 
-	hns3_put_ring_config(priv);
+	hns3_dealloc_rings(priv);
 
 	return 0;
 }

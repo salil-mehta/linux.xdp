@@ -395,6 +395,7 @@ struct ring_stats {
 };
 
 struct hns3_enet_ring {
+	struct net_device *netdev; /* device ring belongs to */
 	struct hns3_desc *desc; /* dma map address space */
 	struct hns3_desc_cb *desc_cb;
 	struct hns3_enet_ring *next;
