@@ -444,19 +444,32 @@ static int hns3_nic_net_up(struct net_device *netdev)
 		hns3_vector_enable(&priv->tqp_vector[i]);
 
 	/* enable rcb */
-	for (j = 0; j < h->kinfo.num_tqps; j++)
+	for (j = 0; j < h->kinfo.num_tqps; j++) {
 		hns3_tqp_enable(h->kinfo.tqp[j]);
+		if (hns3_is_xdp_enabled(netdev)) {
+			hns3_tqp_enable(h->kinfo.tqp[j + h->kinfo.num_tqps]);
+		}
+	}
 
 	/* start the ae_dev */
 	ret = h->ae_algo->ops->start ? h->ae_algo->ops->start(h) : 0;
 	if (ret) {
 		set_bit(HNS3_NIC_STATE_DOWN, &priv->state);
-		while (j--)
-			hns3_tqp_disable(h->kinfo.tqp[j]);
-
-		for (j = i - 1; j >= 0; j--)
-			hns3_vector_disable(&priv->tqp_vector[j]);
+		goto err_ae_start;
 	}
+
+	return ret;
+
+err_ae_start:
+	while (j--) {
+		hns3_tqp_disable(h->kinfo.tqp[j]);
+		if (hns3_is_xdp_enabled(netdev)) {
+			hns3_tqp_disable(h->kinfo.tqp[j + h->kinfo.num_tqps]);
+		}
+	}
+
+	for (j = i - 1; j >= 0; j--)
+		hns3_vector_disable(&priv->tqp_vector[j]);
 
 	return ret;
 }
@@ -546,8 +559,12 @@ static void hns3_nic_net_down(struct net_device *netdev)
 		hns3_vector_disable(&priv->tqp_vector[i]);
 
 	/* disable rcb */
-	for (i = 0; i < h->kinfo.num_tqps; i++)
+	for (i = 0; i < h->kinfo.num_tqps; i++) {
 		hns3_tqp_disable(h->kinfo.tqp[i]);
+		if (hns3_is_xdp_enabled(netdev)) {
+			hns3_tqp_disable(h->kinfo.tqp[i + h->kinfo.num_tqps]);
+		}
+	}
 
 	/* stop ae_dev */
 	ops = priv->ae_handle->ae_algo->ops;
