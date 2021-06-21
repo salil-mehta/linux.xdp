@@ -3732,8 +3732,17 @@ static int hns3_nic_init_vector_data(struct hns3_nic_priv *priv)
 		hns3_add_ring_to_group(&tqp_vector->rx_group,
 				       &priv->ring[i + tqp_num]);
 
+		/* add xdp tx ring to the same tx vector group */
+		if (hns3_is_xdp_enabled(priv->netdev)) {
+			hns3_add_ring_to_group(&tqp_vector->tx_group,
+						&priv->xdp_rings[i]);
+		}
+
 		priv->ring[i].tqp_vector = tqp_vector;
 		priv->ring[i + tqp_num].tqp_vector = tqp_vector;
+		if (hns3_is_xdp_enabled(priv->netdev))
+			priv->xdp_rings[i].tqp_vector = tqp_vector;
+
 		tqp_vector->num_tqps++;
 	}
 
