@@ -3892,6 +3892,7 @@ static void hns3_init_ring_defs(struct hns3_nic_priv *priv, struct hns3_enet_rin
 	ring->next_to_use = 0;
 	ring->next_to_clean = 0;
 	ring->last_to_use = 0;
+	ring->xdp_prog = NULL;
 }
 
 static int hns3_alloc_rings(struct hns3_nic_priv *priv)
@@ -3909,6 +3910,12 @@ static int hns3_alloc_rings(struct hns3_nic_priv *priv)
 	if (!priv->ring)
 		return -ENOMEM;
 
+	/* salil: TODO: (check managed allocs everywhere) alloc XDP TX rings as well */
+	if (hns3_is_xdp_enabled(priv->netdev))
+		priv->xdp_rings = devm_kzalloc(&pdev->dev,
+					    sizeof(*priv->ring)*h->kinfo.num_tqps,
+					    GFP_KERNEL);
+
 	/* initialize ring params to its defaults */
 	for (i = 0; i < h->kinfo.num_tqps; i++) {
 		/* RX/TX rings belong to same TQP */
@@ -3919,6 +3926,16 @@ static int hns3_alloc_rings(struct hns3_nic_priv *priv)
 		ring = &priv->ring[q->tqp_index + h->kinfo.num_tqps];
 		hns3_init_ring_defs(priv, ring, q, HNAE3_RING_TYPE_RX);
 		rx_ring = ring;
+
+		/* initialize only TX rings for the XDP */
+		if (hns3_is_xdp_enabled(priv->netdev)) {
+			q = h->kinfo.tqp[i + h->kinfo.num_tqps];
+			/* 2nd half of hnae queues are xdp queues. we treat them differently */
+			ring = &priv->xdp_rings[q->tqp_index%h->kinfo.num_tqps];
+			hns3_init_ring_defs(priv, ring, q, HNAE3_RING_TYPE_TX);
+			/* store this ring for use with XDP_TX later */
+			rx_ring->xdp_tx_ring = ring;
+		}
 	}
 
 	return 0;
@@ -3931,10 +3948,19 @@ static void hns3_dealloc_rings(struct hns3_nic_priv *priv)
 
 	devm_kfree(priv->dev, priv->ring);
 	priv->ring = NULL;
+
+	if (!priv->xdp_rings)
+		return;
+
+	if (hns3_is_xdp_enabled(priv->netdev))
+		devm_kfree(priv->dev, priv->xdp_rings);
+	priv->xdp_rings = NULL;
 }
 
 static int hns3_alloc_ring_memory(struct hns3_enet_ring *ring)
 {
+	struct hns3_nic_priv *priv = netdev_priv(ring->netdev);
+	struct hnae3_handle *h = priv->ae_handle;
 	int ret;
 
 	if (ring->desc_num <= 0 || ring->buf_size <= 0)
@@ -3959,7 +3985,30 @@ static int hns3_alloc_ring_memory(struct hns3_enet_ring *ring)
 	if (ret)
 		goto out_with_desc;
 
-	return 0;
+	if (hns3_is_xdp_enabled(priv->netdev)) {
+		WRITE_ONCE(ring->xdp_prog, priv->xdp_prog);
+	}
+
+	/* reg xdp rxq only if we are PF (we do not support xdp on VF yet) */
+	if (hns3_is_phys_func(h->pdev) && !xdp_rxq_info_is_reg(&ring->xdp_rxq)) {
+		ret = xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
+				     ring->queue_index,
+				     ring->tqp_vector->napi.napi_id);
+		if (ret) {
+			netdev_err(ring->netdev, "fail(=%d) to reg xdp rxq info\n", ret);
+			return ret;
+		}
+
+		ret = xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
+						 MEM_TYPE_PAGE_SHARED,
+						 NULL);
+		if (ret) {
+			netdev_err(ring->netdev, "fail(=%d) to reg xdp rxq mem model\n", ret);
+			return ret;
+		}
+	}
+
+	return ret;
 
 out_with_desc:
 	hns3_free_desc(ring);
@@ -3972,6 +4021,9 @@ out:
 
 void hns3_fini_ring(struct hns3_enet_ring *ring)
 {
+	struct hns3_nic_priv *priv = netdev_priv(ring->netdev);
+	struct hnae3_handle *h = priv->ae_handle;
+
 	hns3_free_desc(ring);
 	devm_kfree(ring_to_dev(ring), ring->desc_cb);
 	ring->desc_cb = NULL;
@@ -3983,6 +4035,13 @@ void hns3_fini_ring(struct hns3_enet_ring *ring)
 		dev_kfree_skb_any(ring->skb);
 		ring->skb = NULL;
 	}
+
+	if (HNAE3_IS_TX_RING(ring))
+		return;
+
+	if (hns3_is_phys_func(h->pdev) && xdp_rxq_info_is_reg(&ring->xdp_rxq))
+		xdp_rxq_info_unreg(&ring->xdp_rxq);
+	ring->xdp_prog = NULL;
 }
 
 static int hns3_buf_size2type(u32 buf_size)
@@ -4079,12 +4138,26 @@ int hns3_init_all_ring(struct hns3_nic_priv *priv)
 			goto err_rx_ring_alloc;
 		}
 
+		/* alloc xdp tx ring descriptors+buffers */
+		if (hns3_is_xdp_enabled(priv->netdev)) {
+			ret = hns3_alloc_ring_memory(&priv->xdp_rings[i]);
+			if (ret) {
+				dev_err(priv->dev,
+				               "fail(=%d) to alloc xdp tx ring desc/buffs\n", ret);
+				goto err_xdp_tx_ring_alloc;
+			}
+		}
+
 		u64_stats_init(&priv->ring[i].syncp);
 	}
 
 	return 0;
 
 /* roll back all previous allocations */
+err_xdp_tx_ring_alloc:
+	for (j = i - k; j >= 0; j--)
+		hns3_fini_ring(&priv->xdp_rings[j]);
+	k = 0;
 err_rx_ring_alloc:
 	for (j = i - k; j >= 0; j--)
 		hns3_fini_ring(&priv->ring[j + ring_num]);
@@ -4104,6 +4177,10 @@ static void hns3_uninit_all_ring(struct hns3_nic_priv *priv)
 	for (i = 0; i < h->kinfo.num_tqps; i++) {
 		hns3_fini_ring(&priv->ring[i]);
 		hns3_fini_ring(&priv->ring[i + h->kinfo.num_tqps]);
+
+		/* dealloc xdp tx ring descriptors+buffers */
+		if (hns3_is_xdp_enabled(priv->netdev))
+			hns3_fini_ring(&priv->xdp_rings[i]);
 	}
 }
 
@@ -4217,6 +4294,7 @@ static int hns3_client_init(struct hnae3_handle *handle)
 	priv->tx_timeout_count = 0;
 	priv->max_non_tso_bd_num = ae_dev->dev_specs.max_non_tso_bd_num;
 	set_bit(HNS3_NIC_STATE_DOWN, &priv->state);
+	priv->xdp_prog = NULL;
 
 	handle->msg_enable = netif_msg_init(debug, DEFAULT_MSG_LEVEL);
 
@@ -4474,6 +4552,9 @@ static void hns3_clear_all_ring(struct hnae3_handle *h, bool force)
 			hns3_force_clear_rx_ring(ring);
 		else
 			hns3_clear_rx_ring(ring);
+
+		if (hns3_is_xdp_enabled(ndev))
+			hns3_clear_tx_ring(&priv->xdp_rings[i]);
 	}
 }
 
@@ -4514,6 +4595,14 @@ int hns3_nic_reset_all_ring(struct hnae3_handle *h)
 
 		rx_ring->next_to_clean = 0;
 		rx_ring->next_to_use = 0;
+
+		/* clear the xdp tx ring as well */
+		if (hns3_is_xdp_enabled(ndev)) {
+			hns3_clear_tx_ring(&priv->xdp_rings[i]);
+			priv->xdp_rings[i].next_to_clean = 0;
+			priv->xdp_rings[i].next_to_use = 0;
+			priv->xdp_rings[i].last_to_use = 0;
+		}
 	}
 
 	hns3_init_tx_ring_tc(priv);

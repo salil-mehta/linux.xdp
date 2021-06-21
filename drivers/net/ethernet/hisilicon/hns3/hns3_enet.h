@@ -301,6 +301,7 @@ struct hns3_desc_cb {
 	void *priv;
 	u32 page_offset;
 	u32 length;     /* length of the buffer */
+	u32 rx_headroom;
 
 	u16 reuse_flag;
 
@@ -432,6 +433,8 @@ struct hns3_enet_ring {
 
 	/* XDP related fields */
 	struct bpf_prog *xdp_prog;
+	struct xdp_rxq_info xdp_rxq;
+	struct hns3_enet_ring *xdp_tx_ring;
 } ____cacheline_internodealigned_in_smp;
 
 enum hns3_flow_level_range {
@@ -516,6 +519,7 @@ struct hns3_nic_priv {
 	struct hns3_enet_coalesce rx_coal;
 
 	struct bpf_prog *xdp_prog;
+	struct hns3_enet_ring *xdp_rings;
 };
 
 union l3_hdr_info {
