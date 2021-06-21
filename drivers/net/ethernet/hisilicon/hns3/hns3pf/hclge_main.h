@@ -918,6 +918,7 @@ struct hclge_vf_info {
 
 struct hclge_vport {
 	u16 alloc_tqps;	/* Allocated Tx/Rx queues */
+	u16 alloc_xdp_tqps; /* Allocated XDP queues */
 
 	u8  rss_hash_key[HCLGE_RSS_KEY_SIZE]; /* User configured hash keys */
 	/* User configured lookup table entries */

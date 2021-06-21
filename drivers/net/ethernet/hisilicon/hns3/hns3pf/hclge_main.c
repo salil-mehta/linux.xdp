@@ -1682,7 +1682,10 @@ static int  hclge_assign_tqp(struct hclge_vport *vport, u16 num_tqps)
 			alloced++;
 		}
 	}
-	vport->alloc_tqps = alloced;
+
+	vport->alloc_tqps = vport->vport_id? alloced : alloced/2;
+	vport->alloc_xdp_tqps = vport->vport_id? 0 : vport->alloc_tqps;
+
 	kinfo->rss_size = min_t(u16, hdev->pf_rss_size_max,
 				vport->alloc_tqps / hdev->tm_info.num_tc);
 
@@ -1786,6 +1789,7 @@ static int hclge_alloc_vport(struct hclge_dev *hdev)
 	struct hclge_vport *vport;
 	u32 tqp_main_vport;
 	u32 tqp_per_vport;
+	u32 leftover_tqp;
 	int num_vport, i;
 	int ret;
 
@@ -1798,9 +1802,18 @@ static int hclge_alloc_vport(struct hclge_dev *hdev)
 		return -EINVAL;
 	}
 
-	/* Alloc the same number of TQPs for every vport */
-	tqp_per_vport = hdev->num_tqps / num_vport;
-	tqp_main_vport = tqp_per_vport + hdev->num_tqps % num_vport;
+	/* Alloc the same number of TQPs for every vport except PF which will need
+	* twice the amount of TPQs to cater XDP TXQs. Hence, average accordingly.
+	* Yes, this will end up wasting the associated XDP RXQs in this implementation
+	* as we dont have an interface to individually acoount for RXQs and TXQs yet.
+	* Later, we shall add ability to allocate {R,T}XQ individually instead of using this
+	* averaging way on per-vport basis. This will avoid the wastage of the RXQs.
+	*/
+	tqp_per_vport = hdev->num_tqps / (num_vport+1);
+
+	leftover_tqp = hdev->num_tqps % (num_vport+1);
+	leftover_tqp = leftover_tqp%2? leftover_tqp-1 : leftover_tqp;
+	tqp_main_vport = 2*tqp_per_vport + leftover_tqp;
 
 	vport = devm_kcalloc(&pdev->dev, num_vport, sizeof(struct hclge_vport),
 			     GFP_KERNEL);
