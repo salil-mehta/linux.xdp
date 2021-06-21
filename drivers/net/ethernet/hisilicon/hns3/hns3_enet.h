@@ -48,6 +48,7 @@ enum hns3_nic_state {
 #define HNS3_RING_TX_EN_REG			0x000D4
 
 #define HNS3_RX_HEAD_SIZE			256
+#define HNS3_ETH_HDR_PAD			(ETH_HLEN + (VLAN_HLEN * 2) + ETH_FCS_LEN)
 
 #define HNS3_TX_TIMEOUT (5 * HZ)
 #define HNS3_RING_NAME_LEN			16
@@ -57,7 +58,7 @@ enum hns3_nic_state {
 #define HNS3_RING_BD_MULTIPLE			8
 /* max frame size of mac */
 #define HNS3_MAX_MTU(max_frm_size) \
-	((max_frm_size) - (ETH_HLEN + ETH_FCS_LEN + 2 * VLAN_HLEN))
+	((max_frm_size) - HNS3_ETH_HDR_PAD)
 
 #define HNS3_BD_SIZE_512_TYPE			0
 #define HNS3_BD_SIZE_1024_TYPE			1
@@ -427,6 +428,9 @@ struct hns3_enet_ring {
 	int pending_buf;
 	struct sk_buff *skb;
 	struct sk_buff *tail_skb;
+
+	/* XDP related fields */
+	struct bpf_prog *xdp_prog;
 } ____cacheline_internodealigned_in_smp;
 
 enum hns3_flow_level_range {
@@ -509,6 +513,8 @@ struct hns3_nic_priv {
 
 	struct hns3_enet_coalesce tx_coal;
 	struct hns3_enet_coalesce rx_coal;
+
+	struct bpf_prog *xdp_prog;
 };
 
 union l3_hdr_info {
@@ -626,6 +632,9 @@ void hns3_set_vector_coalesce_tx_ql(struct hns3_enet_tqp_vector *tqp_vector,
 
 void hns3_enable_vlan_filter(struct net_device *netdev, bool enable);
 void hns3_request_update_promisc_mode(struct hnae3_handle *handle);
+
+int hns3_reset_notify(struct hnae3_handle *handle,
+			     enum hnae3_reset_notify_type type);
 
 #ifdef CONFIG_HNS3_DCB
 void hns3_dcbnl_setup(struct hnae3_handle *handle);
