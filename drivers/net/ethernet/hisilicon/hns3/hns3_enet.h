@@ -380,10 +380,6 @@ struct ring_stats {
 			u64 tx_l2l3l4_err;
 			u64 tx_tso_err;
 			u64 xdp_tx_pkts;
-			u64 xdp_tx;
-			u64 xdp_tx_err;
-			u64 xdp_redir;
-			u64 xdp_redir_err;
 		};
 		struct {
 			u64 rx_pkts;
@@ -397,8 +393,14 @@ struct ring_stats {
 			u64 csum_complete;
 			u64 rx_multicast;
 			u64 non_reuse_pg;
-			u64 xdp_rx_pkts;
+			u64 xdp_rx_pkts;			
+			u64 xdp_rx_pass;
 			u64 xdp_rx_drop;
+			u64 xdp_rx_drop_rate;
+			u64 xdp_rx_bounce;
+			u64 xdp_rx_bounce_err;			
+			u64 xdp_rx_redir;
+			u64 xdp_rx_redir_err;			
 		};
 	};
 };
@@ -441,9 +443,12 @@ struct hns3_enet_ring {
 
 	/* XDP related fields */
 	DECLARE_BITMAP(xdp_flags, 8);
-	struct bpf_prog *xdp_prog;
+	struct bpf_prog __rcu *xdp_prog;
 	struct xdp_rxq_info xdp_rxq;
 	struct hns3_enet_ring *xdp_tx_ring;
+	unsigned long last_jiffies;
+	u64 time_last;
+	u64 rel_rx_drop;
 } ____cacheline_internodealigned_in_smp;
 
 enum hns3_flow_level_range {

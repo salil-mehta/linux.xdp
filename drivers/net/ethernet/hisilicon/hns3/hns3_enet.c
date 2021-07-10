@@ -2814,7 +2814,7 @@ int hns3_desc_unused(struct hns3_enet_ring *ring)
 	int ntc = ring->next_to_clean;
 	int ntu = ring->next_to_use;
 
-	if (ntc == ntu) return ring->desc_num;
+	// if (ntc == ntu) return ring->desc_num;
 
 	return ((ntc >= ntu) ? 0 : ring->desc_num) + ntc - ntu;
 }
@@ -3442,6 +3442,7 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 		} else if (likely(!err)) {
 			rx_fn(ring, ring->skb);
 			recv_pkts++;
+			hns3_update_rate(ring);
 		}
 
 		unused_count += ring->pending_buf;

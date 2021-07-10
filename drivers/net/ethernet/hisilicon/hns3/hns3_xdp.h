@@ -14,6 +14,22 @@ enum hns3_xdp_status {
 	HNS3_XDP_DROP = BIT(2),
 };
 
+#define hns3_dbg_xdp(__dev, format, args...)                   \
+({                                                             \
+       if (0)                                                  \
+       if (hns3_is_xdp_enabled(__dev))\
+               netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args); \
+       0;                                                      \
+})
+
+#define hns3_dbg(__dev, format, args...)                       \
+({                                                             \
+       if (0)                                                  \
+               netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args); \
+       0;                                                      \
+})
+
+
 #ifdef CONFIG_HNS3_XDP
 static inline bool hns3_is_xdp_enabled(struct net_device *netdev)
 {
@@ -45,4 +61,5 @@ u32 hns3_rx_headroom(struct net_device *netdev) { return 0; }
 void hns3_xdp_complete(struct hns3_enet_ring *ring) { return; }
 #endif
 
+u64 hns3_update_rate(struct hns3_enet_ring *rx_ring);
 #endif

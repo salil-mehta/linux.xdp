@@ -217,48 +217,77 @@ int hns3_xdp_xmit(struct net_device *netdev, int n, struct xdp_frame **frames, u
 	return n - drops;
 }
 
-static bool
+u64 hns3_update_rate(struct hns3_enet_ring *rx_ring)
+{
+	u64 time_elapsed_ns;
+	u64 pps;
+
+	time_elapsed_ns = ktime_get_ns() - rx_ring->time_last;
+	/* update param every 10ms */
+	if (time_elapsed_ns < (NSEC_PER_SEC/10)) {
+		rx_ring->rel_rx_drop++;
+		return 0;
+	}
+
+	pps = div_u64(rx_ring->rel_rx_drop*NSEC_PER_SEC, time_elapsed_ns);
+
+	if (net_ratelimit())
+		netdev_err(rx_ring->netdev, "drops[%llu] / elapsed[%llu] = PPS [%llu] \n",  rx_ring->rel_rx_drop, time_elapsed_ns, pps);
+
+	rx_ring->rel_rx_drop = 0;
+	rx_ring->time_last = ktime_get_ns();
+
+	return pps;
+}
+
+static int
 hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 {
 	struct hns3_enet_ring *xdp_ring = rx_ring->xdp_tx_ring;
 	struct bpf_prog *xdp_prog;
 	u32 act;
 	int ret;
+	u64 pps;
 
 	/* RFC Question: should we? Any security risk in this action? */
 	/* Pass the buffer to stack if we cannot get hold of xdp prog */
 	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
 	if (!xdp_prog)
-		return  false;
+		return  HNS3_XDP_PASS;
 
 	act = bpf_prog_run_xdp(xdp_prog, xdp);
 	switch (act) {
 	case XDP_PASS:
-		return false;
+		return HNS3_XDP_PASS;
 	case XDP_TX:
 		/* transmit the buffer on the XDP TX queue */
 		ret = hns3_xdp_tx(xdp_ring, rx_ring, xdp);
 		if (ret) {
 			u64_stats_update_begin(&xdp_ring->syncp);
-			xdp_ring->stats.xdp_tx_err++;
+			xdp_ring->stats.xdp_rx_bounce_err++;
 			u64_stats_update_end(&xdp_ring->syncp);
-			return true;
+			return ret;
 		}
+
+		u64_stats_update_begin(&xdp_ring->syncp);
+		xdp_ring->stats.xdp_rx_bounce++;
+		u64_stats_update_end(&xdp_ring->syncp);
+
 		__set_bit(HNS3_XDP_TX, rx_ring->xdp_flags);
-		return true;
+		return HNS3_XDP_TX;
 	case XDP_REDIRECT:
 		/* redirect the buffer to other device TX queue */
 		ret = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
 		if (ret) {
 			u64_stats_update_begin(&xdp_ring->syncp);
-			xdp_ring->stats.xdp_redir_err++;
+			xdp_ring->stats.xdp_rx_redir_err++;
 			u64_stats_update_end(&xdp_ring->syncp);
-			return true;
+			return ret;
 		}
 
 		__set_bit(HNS3_XDP_TX, rx_ring->xdp_flags);
 		__set_bit(HNS3_XDP_REDIRECT, rx_ring->xdp_flags);
-		return true;
+		return HNS3_XDP_REDIRECT;
 	default:
 		bpf_warn_invalid_xdp_action(act);
 		fallthrough;
@@ -268,8 +297,9 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 	case XDP_DROP:
 		u64_stats_update_begin(&rx_ring->syncp);
 		rx_ring->stats.xdp_rx_drop++;
+		pps = hns3_update_rate(rx_ring);
 		u64_stats_update_end(&rx_ring->syncp);
-		return true;
+		return HNS3_XDP_DROP;
 	}
 }
 
@@ -281,7 +311,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	struct hns3_desc *desc;
 	struct xdp_buff xdp;
 	u32 bd_base_info;
-	bool consumed;
+	int xdp_verdict;
 	u32 frag_size;
 	int length, ret;
 
@@ -319,9 +349,20 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	xdp.frame_sz = frag_size;
 
 	/* run xdp program */
-	consumed = hns3_xdp_run(ring, &xdp);
-	if (consumed) {
-		ring->skb = 0;
+	xdp_verdict = hns3_xdp_run(ring, &xdp);
+	if (xdp_verdict < 0)
+		return xdp_verdict;
+
+	if (xdp_verdict == HNS3_XDP_DROP) {
+#if 0		
+		/* we are not reusing the buffer so unmap and free */
+//		dma_unmap_page_attrs(ring->dev, desc_cb->dma, desc_cb->length,
+		dma_unmap_page(ring->dev, desc_cb->dma, desc_cb->length,		
+//				         desc_cb->dma_dir, DMA_ATTR_SKIP_CPU_SYNC);
+				         desc_cb->dma_dir);		
+		__page_frag_cache_drain(desc_cb->priv, desc_cb->pagecnt_bias);
+#endif
+		ring->skb = NULL;
 		return 0;
 	}
 

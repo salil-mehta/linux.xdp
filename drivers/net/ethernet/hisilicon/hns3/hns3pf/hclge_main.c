@@ -9035,6 +9035,7 @@ static int hclge_set_vlan_filter_hw(struct hclge_dev *hdev, __be16 proto,
 		dev_err(&hdev->pdev->dev,
 			"Delete port vlan failed, vport %u is not in vlan %u\n",
 			vport_id, vlan_id);
+		dump_stack();
 		return -EINVAL;
 	}
 
