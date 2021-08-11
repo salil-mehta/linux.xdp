@@ -3139,7 +3139,7 @@ static int hns3_alloc_skb(struct hns3_enet_ring *ring, unsigned int length,
 		memcpy(__skb_put(skb, length), va, ALIGN(length, sizeof(long)));
 
 		/* We can reuse buffer as-is, just make sure it is reusable */
-		if (dev_page_is_reusable(desc_cb->priv) && !hns3_is_xdp_enabled(ring->netdev))
+		if (dev_page_is_reusable(desc_cb->priv))
 			desc_cb->reuse_flag = 1;
 		else /* This page cannot be reused so discard it */
 			__page_frag_cache_drain(desc_cb->priv,
@@ -3437,7 +3437,7 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 			err = hns3_handle_rx_bd(ring);
 
 		/* Do not get FE for the packet or failed to alloc skb */
-		if (unlikely(!ring->skb || err < 0)) {
+		if (unlikely(!ring->skb || err == -ENXIO)) {
 			goto out;
 		} else if (likely(!err)) {
 			rx_fn(ring, ring->skb);

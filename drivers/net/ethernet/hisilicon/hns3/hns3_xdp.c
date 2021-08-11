@@ -222,6 +222,9 @@ u64 hns3_update_rate(struct hns3_enet_ring *rx_ring)
 	u64 time_elapsed_ns;
 	u64 pps;
 
+	if (strncmp(rx_ring->netdev->name,"enp125s0f0",10))
+		return 0;
+
 	time_elapsed_ns = ktime_get_ns() - rx_ring->time_last;
 	/* update param every 10ms */
 	if (time_elapsed_ns < (NSEC_PER_SEC/10)) {
