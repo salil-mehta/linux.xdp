@@ -294,6 +294,7 @@ struct __packed hns3_desc {
 };
 
 struct hns3_desc_cb {
+	struct hns3_enet_ring *ring;
 	dma_addr_t dma; /* dma address of this desc */
 	void *buf;      /* cpu addr for a desc */
 	int dma_dir;
@@ -393,14 +394,14 @@ struct ring_stats {
 			u64 csum_complete;
 			u64 rx_multicast;
 			u64 non_reuse_pg;
-			u64 xdp_rx_pkts;			
+			u64 xdp_rx_pkts;
 			u64 xdp_rx_pass;
 			u64 xdp_rx_drop;
 			u64 xdp_rx_drop_rate;
 			u64 xdp_rx_bounce;
-			u64 xdp_rx_bounce_err;			
+			u64 xdp_rx_bounce_err;
 			u64 xdp_rx_redir;
-			u64 xdp_rx_redir_err;			
+			u64 xdp_rx_redir_err;
 		};
 	};
 };
@@ -623,6 +624,12 @@ static inline unsigned int hns3_page_order(struct hns3_enet_ring *ring)
 
 #define hns3_rl_usec_to_reg(int_rl) ((int_rl) >> 2)
 #define hns3_rl_round_down(int_rl) round_down(int_rl, 4)
+
+#define hns3_rl_err(fmt, ...)						\
+	do {								\
+		if (net_ratelimit())					\
+			netdev_err(fmt, ##__VA_ARGS__);			\
+	} while (0)
 
 void hns3_ethtool_set_ops(struct net_device *netdev);
 int hns3_set_channels(struct net_device *netdev,
