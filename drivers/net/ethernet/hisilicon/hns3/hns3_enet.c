@@ -3428,8 +3428,8 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 		/* Poll one pkt */
 		if (hns3_is_xdp_enabled(ring->netdev)) {
 			err = hns3_xdp_handle_rx_bd(ring);
-			if (unlikely(err))
-				recv_pkts++;
+			if (!ring->skb || unlikely(err))
+				goto out;
 		} else {
 			err = hns3_handle_rx_bd(ring);
 			/* Do not get FE for the packet or failed to alloc skb */
@@ -3446,7 +3446,6 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 			}
 			recv_pkts++;
 			hns3_dbg(ring->netdev, " recv_pkts [%d]\n", recv_pkts);
-			//hns3_update_rate(ring);
 		}
 
 		unused_count += ring->pending_buf;

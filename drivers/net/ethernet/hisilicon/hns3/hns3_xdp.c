@@ -276,6 +276,8 @@ int hns3_xdp_xmit(struct net_device *netdev, int n, struct xdp_frame **frames, u
 
 		ret = hns3_xdp_xmit_frame(xdp_ring, xdpf, dma_addr);
 		if (ret) {
+			dma_unmap_single(ring_to_dev(xdp_ring), dma_addr,
+					 xdpf->len, DMA_TO_DEVICE);
 			xdp_return_frame_rx_napi(xdpf);
 			drops++;
 		}
@@ -320,7 +322,7 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 	struct bpf_prog *xdp_prog;
 	int ret = HNS3_XDP_PASS;
 	u32 act;
-	u64 pps;
+//	u64 pps;
 
 	/* RFC Question: should we? Any security risk in this action? */
 	/* Pass the buffer to stack if we cannot get hold of xdp prog */
@@ -357,6 +359,13 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 		ret = HNS3_XDP_TX;
 		break;
 	case XDP_REDIRECT:
+		/*
+		 * TODO: do we need to unmap the buffer now? as it might go
+		 * to different device so DMA mappings need to be destroyed
+		 * and recreated for that target device during xmit there.
+		 *
+		 * Miles to go before I sleep..miles to go before I sleep!
+		 */
 		/* redirect the buffer to other device TX queue */
 		ret = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
 		if (ret) {
@@ -387,7 +396,7 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 		hns3_dbg(rx_ring->netdev, "XDP_DROP\n");
 		u64_stats_update_begin(&rx_ring->syncp);
 		rx_ring->stats.xdp_rx_drop++;
-		pps = hns3_update_rate(rx_ring);
+		//pps = hns3_update_rate(rx_ring);
 		u64_stats_update_end(&rx_ring->syncp);
 
 		ret = HNS3_XDP_DROP;
@@ -400,12 +409,13 @@ exit_unlock:
 }
 
 static void
-hns3_dealloc_rx_buffer(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
+hns3_reuse_or_release_page(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
 {
-	/* reuse this page or release if we cannot use it for any reason */
 	if (hns3_xdp_can_reuse_page(cb)) {
+		hns3_dbg(ring->netdev, "Will reuse page\n");
 		cb->reuse_flag = 1;
 	} else {
+		hns3_dbg(ring->netdev, "releasing page\n");
 		/* we are not reusing the buffer so unmap it */
 		dma_unmap_page_attrs(ring->dev, cb->dma,
 				     hns3_xdp_rx_frame_size(ring),
@@ -467,12 +477,13 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		if (ret & (HNS3_XDP_TX | HNS3_XDP_REDIRECT)) {
 			hns3_xdp_adjust_page_offset(desc_cb);
 		} else {
-			if (ret < 0)
-			     hns3_dbg(ring->netdev, "Drop due to error ERR\n");
+			if (ret & HNS3_XDP_DROP)
+				ret = 0;
 			/* drop and error case of xdp run */
 			desc_cb->pagecnt_bias++;
-			hns3_dealloc_rx_buffer(ring, desc_cb);
 		}
+
+		hns3_reuse_or_release_page(ring, desc_cb);
 
 		return ret;
 	}
@@ -495,6 +506,8 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	}
 	hns3_dbg(ring->netdev, "Send SKB to stack\n");
 	ring->skb = skb;
+
+	hns3_reuse_or_release_page(ring, desc_cb);
 
 	/*
 	 * we dont support multi buffer xdp. This is pathological check.
