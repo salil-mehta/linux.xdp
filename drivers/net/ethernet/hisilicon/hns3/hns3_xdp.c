@@ -289,32 +289,6 @@ int hns3_xdp_xmit(struct net_device *netdev, int n, struct xdp_frame **frames, u
 	return n - drops;
 }
 
-u64 hns3_update_rate(struct hns3_enet_ring *rx_ring)
-{
-	u64 time_elapsed_ns;
-	u64 pps;
-
-	if (strncmp(rx_ring->netdev->name,"enp125s0f0",10))
-		return 0;
-
-	time_elapsed_ns = ktime_get_ns() - rx_ring->time_last;
-	/* update param every 10ms */
-	if (time_elapsed_ns < (NSEC_PER_SEC/10)) {
-		rx_ring->rel_rx_drop++;
-		return 0;
-	}
-
-	pps = div_u64(rx_ring->rel_rx_drop*NSEC_PER_SEC, time_elapsed_ns);
-
-	if (net_ratelimit())
-		netdev_err(rx_ring->netdev, "drops[%llu] / elapsed[%llu] = PPS [%llu] \n",  rx_ring->rel_rx_drop, time_elapsed_ns, pps);
-
-	rx_ring->rel_rx_drop = 0;
-	rx_ring->time_last = ktime_get_ns();
-
-	return pps;
-}
-
 static int
 hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 {
@@ -322,7 +296,6 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 	struct bpf_prog *xdp_prog;
 	int ret = HNS3_XDP_PASS;
 	u32 act;
-//	u64 pps;
 
 	/* RFC Question: should we? Any security risk in this action? */
 	/* Pass the buffer to stack if we cannot get hold of xdp prog */
@@ -363,6 +336,7 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 		 * TODO: do we need to unmap the buffer now? as it might go
 		 * to different device so DMA mappings need to be destroyed
 		 * and recreated for that target device during xmit there.
+		 * Intel's ICE driver is buggy here!!
 		 *
 		 * Miles to go before I sleep..miles to go before I sleep!
 		 */
@@ -396,7 +370,6 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 		hns3_dbg(rx_ring->netdev, "XDP_DROP\n");
 		u64_stats_update_begin(&rx_ring->syncp);
 		rx_ring->stats.xdp_rx_drop++;
-		//pps = hns3_update_rate(rx_ring);
 		u64_stats_update_end(&rx_ring->syncp);
 
 		ret = HNS3_XDP_DROP;
@@ -408,19 +381,44 @@ exit_unlock:
 	return ret;
 }
 
+/**
+ * hns3_reuse_or_relinquish_page - check if the page can be reused by the driver
+ * or it should unmap the page and relinquish. Later means updating the page count
+ * with the unbiased page count(i.e. page count - page count bias) and let the
+ * stack or the xdp redirect or the xdp tx do the work of free'ing the page
+ * eventually which is akin to the unbiased approach (kind of fallback path).
+ * (With this trick, we have deferred the atomic update of the page count as
+ * long as possible and acheived the page reuse)
+ *
+ * @ring: ring to which the page belongs.
+ * @cb: Buffer descriptor common block of the ring to which the page belongs.
+ *
+ */
 static void
-hns3_reuse_or_release_page(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
+hns3_xdp_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
+				  struct hns3_desc_cb *cb)
 {
 	if (hns3_xdp_can_reuse_page(cb)) {
 		hns3_dbg(ring->netdev, "Will reuse page\n");
+		/* mark it for reuse in the RX buffer allocation later */
 		cb->reuse_flag = 1;
 	} else {
 		hns3_dbg(ring->netdev, "releasing page\n");
-		/* we are not reusing the buffer so unmap it */
+		/* 
+		 * we are not reusing the page so unmap it. This should be done
+		 * irrespective of the fact whether we are eventually free'ing
+		 * the page or not. 
+		 */
 		dma_unmap_page_attrs(ring->dev, cb->dma,
 				     hns3_xdp_rx_frame_size(ring),
 				     DMA_FROM_DEVICE,
 				     DMA_ATTR_SKIP_CPU_SYNC);
+		/*
+		 * update the page reference with the unbiased count. This
+		 * might not result in free'ing of the page being relinquished.
+		 * Driver is just falling back to the old unbiased page release
+		 * mechanism.
+		 */
 		__page_frag_cache_drain(cb->priv, cb->pagecnt_bias);
 	}
 }
@@ -483,7 +481,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 			desc_cb->pagecnt_bias++;
 		}
 
-		hns3_reuse_or_release_page(ring, desc_cb);
+		hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
 
 		return ret;
 	}
@@ -507,7 +505,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	hns3_dbg(ring->netdev, "Send SKB to stack\n");
 	ring->skb = skb;
 
-	hns3_reuse_or_release_page(ring, desc_cb);
+	hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
 
 	/*
 	 * we dont support multi buffer xdp. This is pathological check.

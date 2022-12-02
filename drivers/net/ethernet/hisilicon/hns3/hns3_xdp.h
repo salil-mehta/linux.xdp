@@ -14,23 +14,6 @@ enum hns3_xdp_status {
 	HNS3_XDP_DROP = BIT(2),
 };
 
-#define hns3_dbg_xdp(__dev, format, args...)                   \
-({                                                             \
-       if (0)                                                  \
-       if (hns3_is_xdp_enabled(__dev))\
-               netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args); \
-       0;                                                      \
-})
-
-#if 0
-#define hns3_dbg(__dev, format, args...)                       \
-({                                                             \
-       if (0)                                                  \
-               netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args); \
-       0;                                                      \
-})
-#endif
-
 #define hns3_dbg(__dev, format, args...)						\
 	do {								\
 		if (!strcmp(__dev->name, "enp125s0f0"))					\

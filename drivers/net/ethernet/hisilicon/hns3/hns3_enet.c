@@ -2545,11 +2545,11 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 	cb->length = hns3_page_size(ring);
 	cb->type = DESC_TYPE_PAGE;
 	page_ref_add(p, USHRT_MAX - 1);
-	cb->pagecnt_bias = USHRT_MAX;
+	cb->pagecnt_bias = USHRT_MAX - 1;
 	if (hns3_is_xdp_enabled(ring->netdev))
 		cb->rx_headroom = hns3_rx_headroom(ring->netdev);
 	else
-		cb->rx_headroom = 0;
+		cb->rx_headroom = 0; /* TODO: this is not right in hns3 */
 
 	return 0;
 }
