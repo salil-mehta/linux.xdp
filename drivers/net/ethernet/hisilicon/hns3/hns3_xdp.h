@@ -14,6 +14,12 @@ enum hns3_xdp_status {
 	HNS3_XDP_DROP = BIT(2),
 };
 
+#define hns3_dbg(__dev, format, args...)						\
+	do {								\
+		if (!strcmp(__dev->name, "enp125s0f0"))					\
+			netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args);\
+	} while (0)
+
 #ifdef CONFIG_HNS3_XDP
 static inline bool hns3_is_xdp_enabled(struct net_device *netdev)
 {
