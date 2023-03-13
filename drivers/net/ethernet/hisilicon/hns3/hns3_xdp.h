@@ -14,11 +14,50 @@ enum hns3_xdp_status {
 	HNS3_XDP_DROP = BIT(2),
 };
 
+#define HNS_XDP_DEBUG
+
+#ifdef HNS_XDP_DEBUG
+struct hns3_dbg_info {
+	struct net_device *ndev;
+	void *page;
+	u32 pgoff;
+	u16 pgrus;
+	u16 pgcnt;
+	u16 pgcnb;
+	u16 pgcub;
+};
+
+static inline void 
+hns3_get_dbg_info(struct hns3_enet_ring *ring, struct hns3_dbg_info *di)
+{
+	struct hns3_desc_cb *cb = ring->desc_cb;
+
+	di->ndev = ring->netdev;
+	di->page = cb->priv;
+	di->pgoff = cb->page_offset;
+	di->pgrus = cb->reuse_flag;
+	di->pgcnt = page_count(cb->priv);
+	di->pgcnb = cb->pagecnt_bias;
+	di->pgcub = page_count(cb->priv) - cb->pagecnt_bias;
+}
+
 #define hns3_dbg(__dev, format, args...)						\
 	do {								\
 		if (!strcmp(__dev->name, "enp125s0f0"))					\
 			netdev_printk(KERN_ERR, __dev, "[%s][%d]" format, __func__, __LINE__ , ##args);\
 	} while (0)
+
+#define hns3_dbg_pgr(_ring)	\
+	do {	\
+		struct hns3_dbg_info di;	\
+		hns3_get_dbg_info(_ring, &di);	\
+		if (!di.pgcub)	\
+			hns3_dbg(di.ndev, "Bingo! diff is zero\n");	\
+		hns3_dbg(di.ndev, "pgrus[%u], pgoff[%u] pgcnt[%d] pgcnb[%u] pgubc[%u]\n",	\
+			 di.pgrus, di.pgoff, di.pgcnt, di.pgcnb, di.pgcub);	\
+	} while (0)
+
+#endif /* HNS_XDP_DEBUG */
 
 #ifdef CONFIG_HNS3_XDP
 static inline bool hns3_is_xdp_enabled(struct net_device *netdev)

@@ -417,6 +417,7 @@ hns3_xdp_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
 		 */
 		__page_frag_cache_drain(cb->priv, cb->pagecnt_bias);
 	}
+	hns3_dbg_pgr(ring);
 }
 
 int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
@@ -439,7 +440,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	/* Check valid BD */
 	if (unlikely(!(bd_base_info & BIT(HNS3_RXD_VLD_B))))
 		return -ENXIO;
-
+	hns3_dbg(ring->netdev, "\n++++ rx bd ++++\n");
 	dma_rmb();
 
 	length = le16_to_cpu(desc->rx.size);
@@ -455,6 +456,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 			DMA_FROM_DEVICE);
 
 	desc_cb->pagecnt_bias--;
+	hns3_dbg_pgr(ring);
 
 	/* Prefetch first two cache line of the xdp frame data */
 	net_prefetch(data_hard_start);
@@ -476,7 +478,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		/* drop and error case of xdp run */
 		desc_cb->pagecnt_bias++;
 		}
-
+		hns3_dbg_pgr(ring);
 		hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
 
 		return ret;
@@ -496,6 +498,7 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		 * release the page/buffer in this case (I think no?)
 		 */
 		desc_cb->pagecnt_bias++;
+		hns3_dbg_pgr(ring);
 		return -ENOMEM;
 	}
 	ring->skb = skb;
@@ -513,7 +516,8 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		dev_kfree_skb_any(skb);
 		return ret;
 	}
-
+	hns3_dbg_pgr(ring);
+	hns3_dbg(ring->netdev, "++++ End ++++\n");
 	return 0;
 }
 
