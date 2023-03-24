@@ -1977,7 +1977,7 @@ static int hns3_nic_change_mtu(struct net_device *netdev, int new_mtu)
 		return -EBUSY;
 
 	/* XDP frame size should be <= PAGE_SIZE */
-	if (hns3_is_xdp_enabled(netdev) && hns3_xdp_check_max_mtu(netdev)) {
+	if (hns3_is_xdp_enabled(netdev) && !hns3_xdp_check_max_mtu(netdev, new_mtu)) {
 		netdev_err(netdev,
 			  "specified MTU[=%d] exceeds max supported XDP MTU size[=%d]\n",
 			  new_mtu, hns3_xdp_max_mtu(netdev));

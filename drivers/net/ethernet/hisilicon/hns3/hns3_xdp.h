@@ -74,7 +74,7 @@ static inline bool hns3_is_xdp_enabled(struct net_device *netdev)
 
 int hns3_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames, u32 flags);
 int hns3_xdp(struct net_device *netdev, struct netdev_bpf *xdp);
-bool hns3_xdp_check_max_mtu(struct net_device *netdev);
+bool hns3_xdp_check_max_mtu(struct net_device *netdev, u32 mtu);
 u32 hns3_xdp_max_mtu(struct net_device *netdev) ;
 int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring);
 u32 hns3_rx_headroom(struct net_device *netdev);
@@ -83,7 +83,7 @@ void hns3_xdp_complete(struct hns3_enet_ring *ring);
 static inline bool hns3_is_xdp_enabled(struct net_device *netdev) { return false; }
 int hns3_xdp(struct net_device *netdev, struct netdev_bpf *xdp)  { return 0; }
 int hns3_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames, u32 flags) { return 0; }
-bool hns3_xdp_check_max_mtu(struct net_device *netdev)  { return false; }
+bool hns3_xdp_check_max_mtu(struct net_device *netdev, u32 mtu)  { return false; }
 u32 hns3_xdp_max_mtu(struct net_device *netdev)  { return 0; }
 int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring) { return 0; }
 u32 hns3_rx_headroom(struct net_device *netdev) { return 0; }

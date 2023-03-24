@@ -20,16 +20,24 @@ u32 hns3_rx_headroom(struct net_device *netdev)
 
 u32 hns3_xdp_max_mtu(struct net_device *netdev)
 {
-	u32 max_xdp_mtu = SKB_MAX_HEAD(hns3_rx_headroom(netdev)) ;
+	struct hnae3_knic_private_info *kinfo;
+	struct hnae3_handle *h;
+	u32 max_xdp_mtu;
 
+	h = hns3_get_handle(netdev);
+	kinfo = &h->kinfo;
+
+	max_xdp_mtu = kinfo->rx_buf_len;
+	max_xdp_mtu -= hns3_rx_headroom(netdev) ;
 	max_xdp_mtu -= HNS3_ETH_HDR_PAD;
+	max_xdp_mtu -= SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 
 	return max_xdp_mtu;
 }
 
-bool hns3_xdp_check_max_mtu(struct net_device *netdev)
+bool hns3_xdp_check_max_mtu(struct net_device *netdev, u32 mtu)
 {
-	return netdev->mtu <= hns3_xdp_max_mtu(netdev) ;
+	return mtu <= hns3_xdp_max_mtu(netdev) ;
 }
 
 static u32 hns3_xdp_rx_frame_size(struct hns3_enet_ring *ring)
@@ -57,7 +65,7 @@ static int hns3_xdp_check(struct net_device *netdev, struct bpf_prog *prog)
 
 	 /* TODO:  Enable GRO check for hns3 here */
 
-	if (!hns3_xdp_check_max_mtu(netdev)) {
+	if (!hns3_xdp_check_max_mtu(netdev, netdev->mtu)) {
 		netdev_warn(netdev,
 			      "For now, XDP is not supported with MTU exceeding %d\n",
 			       hns3_xdp_max_mtu(netdev));
