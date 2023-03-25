@@ -481,13 +481,15 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		if (ret & (HNS3_XDP_TX | HNS3_XDP_REDIRECT)) {
 			hns3_xdp_adjust_page_offset(desc_cb);
 		} else {
-		if (ret & HNS3_XDP_DROP)
-			ret = 0;
-		/* drop and error case of xdp run */
-		desc_cb->pagecnt_bias++;
+			if (ret & HNS3_XDP_DROP)
+				ret = 0;
+			/* drop and error case of xdp run */
+			desc_cb->pagecnt_bias++;
 		}
+
 		hns3_dbg_pgr(ring);
 		hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
+		hns3_rx_ring_move_fw(ring);
 
 		return ret;
 	}
