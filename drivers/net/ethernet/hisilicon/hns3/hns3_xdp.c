@@ -431,7 +431,7 @@ hns3_xdp_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
 int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 {
 	u32 frame_size, frag_size, bd_base_info;
-	struct sk_buff *skb = ring->skb;
+	struct sk_buff *skb;
 	struct hns3_desc_cb *desc_cb;
 	void *data, *data_hard_start;
 	struct hns3_desc *desc;
@@ -511,7 +511,6 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 		hns3_dbg_pgr(ring);
 		return -ENOMEM;
 	}
-	ring->skb = skb;
 
 	hns3_xdp_reuse_or_relinquish_page(ring, desc_cb);
 
