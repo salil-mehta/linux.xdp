@@ -2615,9 +2615,6 @@ static void hns3_free_buffer_detach(struct hns3_enet_ring *ring, int i,
 {
 	struct hns3_desc_cb *cb = &ring->desc_cb[i];
 
-	if (!ring->desc_cb[i].dma)
-		return;
-
 	hns3_buffer_detach(ring, i);
 	hns3_free_buffer(ring, cb, budget);
 }
