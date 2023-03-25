@@ -2670,12 +2670,13 @@ out:
 
 static int hns3_alloc_and_attach_buffer(struct hns3_enet_ring *ring, int i)
 {
-	int ret = hns3_alloc_and_map_buffer(ring, &ring->desc_cb[i]);
+	struct hns3_desc_cb *cb = &ring->desc_cb[i];
+	int ret = hns3_alloc_and_map_buffer(ring, cb);
 
 	if (ret)
 		return ret;
 
-	ring->desc[i].addr = cpu_to_le64(ring->desc_cb[i].dma);
+	ring->desc[i].addr = cpu_to_le64(cb->dma + cb->rx_headroom);
 
 	return 0;
 }
@@ -2705,15 +2706,16 @@ static void hns3_replace_buffer(struct hns3_enet_ring *ring, int i,
 {
 	hns3_unmap_buffer(ring, &ring->desc_cb[i]);
 	ring->desc_cb[i] = *res_cb;
-	ring->desc[i].addr = cpu_to_le64(ring->desc_cb[i].dma);
+	ring->desc[i].addr = cpu_to_le64(res_cb->dma + res_cb->rx_headroom);
 	ring->desc[i].rx.bd_base_info = 0;
 }
 
 static void hns3_reuse_buffer(struct hns3_enet_ring *ring, int i)
 {
+	struct hns3_desc_cb *cb = &ring->desc_cb[i];
+
 	ring->desc_cb[i].reuse_flag = 0;
-	ring->desc[i].addr = cpu_to_le64(ring->desc_cb[i].dma +
-					 ring->desc_cb[i].page_offset);
+	ring->desc[i].addr = cpu_to_le64(cb->dma + cb->page_offset + cb->rx_headroom);
 	ring->desc[i].rx.bd_base_info = 0;
 
 	dma_sync_single_for_device(ring_to_dev(ring),
