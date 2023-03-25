@@ -417,6 +417,8 @@ hns3_xdp_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
 				     hns3_xdp_rx_frame_size(ring),
 				     DMA_FROM_DEVICE,
 				     DMA_ATTR_SKIP_CPU_SYNC);
+		cb->dma = 0;
+
 		/*
 		 * update the page reference with the unbiased count. This
 		 * might not result in free'ing of the page being relinquished.

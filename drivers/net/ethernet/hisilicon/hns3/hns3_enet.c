@@ -2542,6 +2542,7 @@ static int hns3_alloc_buffer(struct hns3_enet_ring *ring,
 	cb->page_offset = 0;
 	cb->reuse_flag = 0;
 	cb->buf  = page_address(p);
+	cb->dma = 0;
 	cb->length = hns3_page_size(ring);
 	cb->type = DESC_TYPE_PAGE;
 	page_ref_add(p, USHRT_MAX - 1);
@@ -2581,10 +2582,14 @@ static int hns3_map_buffer(struct hns3_enet_ring *ring, struct hns3_desc_cb *cb)
 static void hns3_unmap_buffer(struct hns3_enet_ring *ring,
 			      struct hns3_desc_cb *cb)
 {
+	/* check if buffer is already unmapped */
+	if (!cb->dma)
+		return;
+
 	if (cb->type == DESC_TYPE_XDP_XMIT) {
 		dma_unmap_page(ring_to_dev(ring), cb->dma, cb->length,
 			                 cb->dma_dir);
-		return;
+		goto out_unmapped;
 	}
 
 	if (cb->type == DESC_TYPE_SKB || cb->type == DESC_TYPE_FRAGLIST_SKB)
@@ -2593,6 +2598,10 @@ static void hns3_unmap_buffer(struct hns3_enet_ring *ring,
 	else if (cb->length)
 		dma_unmap_page(ring_to_dev(ring), cb->dma, cb->length,
 			                 cb->dma_dir);
+
+out_unmapped:
+	cb->dma  = 0;
+	return;
 }
 
 static void hns3_buffer_detach(struct hns3_enet_ring *ring, int i)
