@@ -2822,6 +2822,11 @@ int hns3_desc_unused(struct hns3_enet_ring *ring)
 	return ((ntc >= ntu) ? 0 : ring->desc_num) + ntc - ntu;
 }
 
+int hns3_desc_to_be_cleaned(struct hns3_enet_ring *ring)
+{
+	return ring->desc_num - hns3_desc_unused(ring);
+}
+
 static void hns3_nic_alloc_rx_buffers(struct hns3_enet_ring *ring,
 				      int cleand_count)
 {
@@ -3171,6 +3176,7 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 	struct hns3_desc_cb *desc_cb;
 	struct hns3_desc *desc;
 	u32 bd_base_info;
+	u32 clean_count = hns3_desc_to_be_cleaned(ring);
 
 	do {
 		desc = &ring->desc[ring->next_to_clean];
@@ -3186,7 +3192,7 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 			if (unlikely(!new_skb)) {
 				hns3_rl_err(ring_to_netdev(ring),
 					    "alloc rx fraglist skb fail\n");
-				return -ENXIO;
+				return -ENOMEM;
 			}
 			ring->frag_num = 0;
 
@@ -3215,7 +3221,14 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 		trace_hns3_rx_desc(ring);
 		hns3_rx_ring_move_fw(ring);
 		ring->pending_buf++;
-	} while (!(bd_base_info & BIT(HNS3_RXD_FE_B)));
+		clean_count--;
+
+		/* check if we have reached max BD count for GRO packet and still
+		 * have not received teh EOP. We should drop such a packet
+		 */
+		if (ring->pending_buf >= HNS3_MAX_GRO_BD_NUM)
+			return -ENOSPC;
+	} while (!(bd_base_info & BIT(HNS3_RXD_FE_B)) && clean_count);
 
 	return 0;
 }
@@ -3388,13 +3401,13 @@ static int hns3_handle_rx_bd(struct hns3_enet_ring *ring)
 			return ret;
 		if (!(bd_base_info & BIT(HNS3_RXD_FE_B))) { /* need add frag */
 			ret = hns3_add_frag(ring);
-			if (ret)
-				return ret;
+			if (unlikely(ret))
+				goto out_check_free;
 		}
 	} else {
 		ret = hns3_add_frag(ring);
-		if (ret)
-			return ret;
+		if (unlikely(ret))
+			goto  out_check_free;
 	}
 
 	/* As the head data may be changed when GRO enable, copy
@@ -3405,13 +3418,16 @@ static int hns3_handle_rx_bd(struct hns3_enet_ring *ring)
 		       ALIGN(ring->pull_len, sizeof(long)));
 
 	ret = hns3_handle_bdinfo(ring, skb);
-	if (unlikely(ret)) {
-		dev_kfree_skb_any(skb);
-		return ret;
-	}
+	if (unlikely(ret))
+		goto out_check_free;
 
 	skb_record_rx_queue(skb, ring->tqp->tqp_index);
-	return 0;
+out_check_free:
+	if (ret == -ENOSPC) {
+		dev_kfree_skb_any(skb);
+		ring->skb = NULL;
+	}
+	return ret;
 }
 
 int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
@@ -3435,27 +3451,23 @@ int hns3_clean_rx_ring(struct hns3_enet_ring *ring, int budget,
 		/* Poll one pkt */
 		if (hns3_is_xdp_enabled(ring->netdev)) {
 			err = hns3_xdp_handle_rx_bd(ring);
-			if (!ring->skb || unlikely(err))
-				goto out;
 		} else {
 			err = hns3_handle_rx_bd(ring);
-		/* Do not get FE for the packet or failed to alloc skb */
-			if (unlikely(!ring->skb || err == -ENXIO)) {
-			goto out;
-			}
 		}
 
 		/* pass 'skb' to stack */
-		if (likely(!err)) {
-			if (ring->skb) {
+		if (ring->skb && likely(!err))
 			rx_fn(ring, ring->skb);
-			}
-			recv_pkts++;
-		}
+
+		/* alloc skb failed or did not receive EOF yet */
+		if (err == -ENOMEM || err == -ENXIO)
+			goto out;
 
 		unused_count += ring->pending_buf;
 		ring->skb = NULL;
 		ring->pending_buf = 0;
+
+		recv_pkts++;
 	}
 
 out:

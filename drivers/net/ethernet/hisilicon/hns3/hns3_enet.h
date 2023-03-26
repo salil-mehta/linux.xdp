@@ -192,6 +192,8 @@ enum hns3_nic_state {
 #define HNS3_MAX_NON_TSO_SIZE(max_non_tso_bd_num) \
 	(HNS3_MAX_BD_SIZE * (max_non_tso_bd_num))
 
+#define HNS3_MAX_GRO_BD_NUM			63U
+
 #define HNS3_VECTOR_GL0_OFFSET			0x100
 #define HNS3_VECTOR_GL1_OFFSET			0x200
 #define HNS3_VECTOR_GL2_OFFSET			0x300
@@ -646,6 +648,7 @@ int hns3_clean_rx_ring(
 void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring);
 int hns3_handle_bdinfo(struct hns3_enet_ring *ring, struct sk_buff *skb);
 int hns3_desc_unused(struct hns3_enet_ring *ring);
+int hns3_desc_to_be_cleaned(struct hns3_enet_ring *ring);
 void hns3_tx_doorbell(struct hns3_enet_ring *ring, int num, bool doorbell);
 
 void hns3_set_vector_coalesce_rx_gl(struct hns3_enet_tqp_vector *tqp_vector,
