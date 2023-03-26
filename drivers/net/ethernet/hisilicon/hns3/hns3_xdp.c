@@ -440,6 +440,8 @@ int hns3_xdp_handle_rx_bd(struct hns3_enet_ring *ring)
 	struct xdp_buff xdp;
 	int length, ret;
 
+	ring->skb = NULL; /* TODO: we need to remove this later */
+
 	desc = &ring->desc[ring->next_to_clean];
 	desc_cb = &ring->desc_cb[ring->next_to_clean];
 
