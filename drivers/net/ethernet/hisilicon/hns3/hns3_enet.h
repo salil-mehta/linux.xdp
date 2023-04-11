@@ -613,6 +613,22 @@ static inline unsigned int hns3_page_order(struct hns3_enet_ring *ring)
 
 #define hns3_page_size(_ring) (PAGE_SIZE << hns3_page_order(_ring))
 
+static inline u32 hns3_rx_buf_truesize(struct hns3_enet_ring *ring)
+{
+	return ring->desc_cb->length / 2;
+}
+
+static inline void hns3_adjust_page_offset(struct hns3_desc_cb *cb)
+{
+	unsigned int frame_size = hns3_rx_buf_truesize(cb->ring);
+
+	/*
+	 * TODO: Need to add proper page reuse handling for page size >= 8k
+	 */
+	/* flip to unused part of the page */
+	cb->page_offset ^= frame_size;
+}
+
 /* iterator for handling rings in ring group */
 #define hns3_for_each_ring(pos, head) \
 	for (pos = (head).ring; (pos); pos = (pos)->next)

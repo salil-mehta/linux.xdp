@@ -2867,11 +2867,65 @@ static void hns3_nic_alloc_rx_buffers(struct hns3_enet_ring *ring,
 	writel(i, ring->tqp->io_base + HNS3_RING_RX_RING_HEAD_REG);
 }
 
+#if 0 // DEBUG NO_XDP
 static bool hns3_can_reuse_page(struct hns3_desc_cb *cb)
 {
 	return (page_count(cb->priv) - cb->pagecnt_bias) == 1;
 }
+#endif
 
+static bool hns3_can_reuse_page(struct hns3_desc_cb *cb)
+{
+	struct page *page = (struct page *)cb->priv;
+	u16 pagecnt_bias = cb->pagecnt_bias;
+
+	/* distant node and pfmemalloc pages should not be reused */
+	if (!dev_page_is_reusable(page))
+		return false;
+
+	/* check if stack is using the other part of the page */
+	/*
+	 * TODO: Need to add proper page reuse handling for page size >= 8k
+	 */
+	if ((unlikely(page_count(page) - pagecnt_bias) > 1))
+		return false;
+
+	if (unlikely(pagecnt_bias == 1)) {
+		page_ref_add(page, USHRT_MAX - 1);
+		cb->pagecnt_bias = USHRT_MAX;
+	}
+
+	return true;
+}
+
+static void
+hns3_reuse_or_relinquish_page(struct hns3_enet_ring *ring,
+				  struct hns3_desc_cb *cb)
+{
+	if (hns3_can_reuse_page(cb)) {
+		/* mark it for reuse in the RX buffer allocation later */
+		cb->reuse_flag = 1;
+	} else {
+		/*
+		 * we are not reusing the page so unmap it. This should be done
+		 * irrespective of the fact whether we are eventually free'ing
+		 * the page or not.
+		 */
+		dma_unmap_page_attrs(ring->dev, cb->dma, cb->length, cb->dma_dir,
+				     DMA_ATTR_SKIP_CPU_SYNC);
+		cb->dma = 0;
+
+		/*
+		 * update the page reference with the unbiased count. This
+		 * might not result in free'ing of the page being relinquished.
+		 * Driver is just falling back to the old unbiased page release
+		 * mechanism.
+		 */
+		__page_frag_cache_drain(cb->priv, cb->pagecnt_bias);
+	}
+}
+
+#if 0 // DEBUG NO_XDP
 static void hns3_nic_reuse_page(struct sk_buff *skb, int i,
 				struct hns3_enet_ring *ring, int pull_len,
 				struct hns3_desc_cb *desc_cb)
@@ -2912,6 +2966,7 @@ static void hns3_nic_reuse_page(struct sk_buff *skb, int i,
 		desc_cb->pagecnt_bias = USHRT_MAX;
 	}
 }
+#endif
 
 static int hns3_gro_complete(struct sk_buff *skb, u32 l234info)
 {
@@ -3117,6 +3172,7 @@ void hns3_rx_ring_move_fw(struct hns3_enet_ring *ring)
 		ring->next_to_clean = 0;
 }
 
+#if 0 // DEBUG NO_XDP
 static int hns3_alloc_skb(struct hns3_enet_ring *ring, unsigned int length,
 			  unsigned char *va)
 {
@@ -3167,6 +3223,48 @@ static int hns3_alloc_skb(struct hns3_enet_ring *ring, unsigned int length,
 
 	return 0;
 }
+#endif
+
+static int
+hns3_build_skb_(struct hns3_enet_ring *ring, unsigned int length)
+{
+	struct hns3_desc_cb *desc_cb = &ring->desc_cb[ring->next_to_clean];
+	struct net_device *netdev = ring_to_netdev(ring);
+	struct sk_buff *skb;
+
+	skb = ring->skb = napi_build_skb(ring->va, hns3_rx_buf_truesize(ring));
+	if (unlikely(!skb)) {
+		hns3_rl_err(netdev, "failed to build skb from RX'ed buffer\n");
+
+		u64_stats_update_begin(&ring->syncp);
+		ring->stats.sw_err_cnt++;
+		u64_stats_update_end(&ring->syncp);
+
+		return -ENOMEM;
+	}
+
+	trace_hns3_rx_desc(ring);
+	prefetchw(skb->data);
+
+	ring->pending_buf = 1;
+	ring->frag_num = 0;
+	ring->tail_skb = NULL;
+
+	skb_put(skb, length);
+
+	skb_metadata_clear(skb);
+
+	skb_record_rx_queue(skb, ring->tqp->tqp_index);
+
+	u64_stats_update_begin(&ring->syncp);
+	ring->stats.seg_pkt_cnt++;
+	u64_stats_update_end(&ring->syncp);
+
+	hns3_adjust_page_offset(desc_cb);
+	hns3_rx_ring_move_fw(ring);
+
+	return 0;
+}
 
 static int hns3_add_frag(struct hns3_enet_ring *ring)
 {
@@ -3177,6 +3275,7 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 	struct hns3_desc *desc;
 	u32 bd_base_info;
 	u32 clean_count = hns3_desc_to_be_cleaned(ring);
+	u32 length;
 
 	do {
 		desc = &ring->desc[ring->next_to_clean];
@@ -3186,6 +3285,8 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 		dma_rmb();
 		if (!(bd_base_info & BIT(HNS3_RXD_VLD_B)))
 			return -ENXIO;
+
+		length = le16_to_cpu(desc->rx.size);
 
 		if (unlikely(ring->frag_num >= MAX_SKB_FRAGS)) {
 			new_skb = napi_alloc_skb(&ring->tqp_vector->napi, 0);
@@ -3215,11 +3316,19 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 		dma_sync_single_for_cpu(ring_to_dev(ring),
 				desc_cb->dma + desc_cb->page_offset,
 				hns3_buf_size(ring),
-				DMA_FROM_DEVICE);
+				desc_cb->dma_dir);
 
-		hns3_nic_reuse_page(skb, ring->frag_num++, ring, 0, desc_cb);
+		/* this rx buffer is being used now */
+		desc_cb->pagecnt_bias--;
+
+		skb_add_rx_frag(skb, ring->frag_num++, desc_cb->priv,
+				desc_cb->page_offset, length, hns3_buf_size(ring));
+		//hns3_nic_reuse_page(skb, ring->frag_num++, ring, 0, desc_cb);
 		trace_hns3_rx_desc(ring);
+
+		hns3_adjust_page_offset(desc_cb);
 		hns3_rx_ring_move_fw(ring);
+
 		ring->pending_buf++;
 		clean_count--;
 
@@ -3394,11 +3503,23 @@ static int hns3_handle_rx_bd(struct hns3_enet_ring *ring)
 		 */
 		net_prefetch(ring->va);
 
-		ret = hns3_alloc_skb(ring, length, ring->va);
+		/* this rx buffer is being used now */
+		desc_cb->pagecnt_bias--;
+
+		//ret = hns3_alloc_skb(ring, length, ring->va);
+		ret = hns3_build_skb_(ring, length);
+		if (ret) {
+			/*
+			 * page (offset, reuse} are still the old one. Do we have to
+			 * release the page/buffer in this case (I think no?)
+			 */
+			desc_cb->pagecnt_bias++;
+			return ret;
+		}
 		skb = ring->skb;
 
-		if (ret < 0) /* alloc buffer fail */
-			return ret;
+		//if (ret < 0) /* alloc buffer fail */
+		//	return ret;
 		if (!(bd_base_info & BIT(HNS3_RXD_FE_B))) { /* need add frag */
 			ret = hns3_add_frag(ring);
 			if (unlikely(ret))
@@ -3413,15 +3534,19 @@ static int hns3_handle_rx_bd(struct hns3_enet_ring *ring)
 	/* As the head data may be changed when GRO enable, copy
 	 * the head data in after other data rx completed
 	 */
+#if 0
 	if (skb->len > HNS3_RX_HEAD_SIZE)
 		memcpy(skb->data, ring->va,
 		       ALIGN(ring->pull_len, sizeof(long)));
+#endif
+	/* before sending to stack check if this page should be relinquished */
+	hns3_reuse_or_relinquish_page(ring, desc_cb);
 
 	ret = hns3_handle_bdinfo(ring, skb);
 	if (unlikely(ret))
 		goto out_check_free;
 
-	skb_record_rx_queue(skb, ring->tqp->tqp_index);
+	//skb_record_rx_queue(skb, ring->tqp->tqp_index);
 out_check_free:
 	if (ret == -ENOSPC) {
 		dev_kfree_skb_any(skb);
