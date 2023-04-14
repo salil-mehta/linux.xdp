@@ -584,10 +584,12 @@ hns3_xdp_setup_prog(struct net_device *ndev, struct bpf_prog *prog)
 
 	ifup = !test_bit(HNS3_NIC_STATE_DOWN, &priv->state);
 
-	ret = hns3_reset_notify(h, HNAE3_DOWN_CLIENT);
-	if (ret) {
-		netdev_err(ndev, "Client down fail, this should'nt have happened!\n");
-		return ret;
+	if (ifup) {
+		ret = hns3_reset_notify(h, HNAE3_DOWN_CLIENT);
+		if (ret) {
+			netdev_err(ndev, "Client down fail, this should'nt have happened!\n");
+			return ret;
+		}
 	}
 
 	/* We do not need full reset when exchanging programs */
