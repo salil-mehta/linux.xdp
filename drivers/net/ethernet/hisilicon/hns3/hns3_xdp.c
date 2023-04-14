@@ -315,6 +315,9 @@ hns3_xdp_run(struct hns3_enet_ring *rx_ring, struct xdp_buff *xdp)
 	act = bpf_prog_run_xdp(xdp_prog, xdp);
 	switch (act) {
 	case XDP_PASS:
+		u64_stats_update_begin(&rx_ring->syncp);
+		rx_ring->stats.xdp_rx_pass++;
+		u64_stats_update_end(&rx_ring->syncp);
 		/* return and continue with normal SKB path */
 		break;
 	case XDP_TX:
