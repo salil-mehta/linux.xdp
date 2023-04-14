@@ -14,7 +14,7 @@ enum hns3_xdp_status {
 	HNS3_XDP_DROP = BIT(2),
 };
 
-#define HNS_XDP_DEBUG
+//#define HNS_XDP_DEBUG
 
 #ifdef HNS_XDP_DEBUG
 struct hns3_dbg_info {
@@ -56,7 +56,9 @@ hns3_get_dbg_info(struct hns3_enet_ring *ring, struct hns3_dbg_info *di)
 		hns3_dbg(di.ndev, "pgrus[%u], pgoff[%u] pgcnt[%d] pgcnb[%u] pgubc[%u]\n",	\
 			 di.pgrus, di.pgoff, di.pgcnt, di.pgcnb, di.pgcub);	\
 	} while (0)
-
+#else
+#define hns3_dbg(__dev, format, args...);
+#define hns3_dbg_pgr(_ring);
 #endif /* HNS_XDP_DEBUG */
 
 #ifdef CONFIG_HNS3_XDP
