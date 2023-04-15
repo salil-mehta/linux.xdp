@@ -3240,7 +3240,7 @@ hns3_build_skb_(struct hns3_enet_ring *ring, unsigned int length)
 	/* avoid header copying overhead if the enitre packet is present within
 	 * the single RX buffer
 	 */
-	if (eop) {
+	if (eop && (length < netdev->mtu) ) {
 		skb = ring->skb = napi_build_skb(ring->va,
 						 hns3_rx_buf_truesize(ring));
 	} else {
