@@ -3229,10 +3229,25 @@ static int
 hns3_build_skb_(struct hns3_enet_ring *ring, unsigned int length)
 {
 	struct hns3_desc_cb *desc_cb = &ring->desc_cb[ring->next_to_clean];
+	struct hns3_desc *desc = &ring->desc[ring->next_to_clean];
 	struct net_device *netdev = ring_to_netdev(ring);
 	struct sk_buff *skb;
+	u32 ethhlen;
+	bool eop;
 
-	skb = ring->skb = napi_build_skb(ring->va, hns3_rx_buf_truesize(ring));
+	eop = !!(le32_to_cpu(desc->rx.bd_base_info) & BIT(HNS3_RXD_FE_B));
+
+	/* avoid header copying overhead if the enitre packet is present within
+	 * the single RX buffer
+	 */
+	if (eop) {
+		skb = ring->skb = napi_build_skb(ring->va,
+						 hns3_rx_buf_truesize(ring));
+	} else {
+		/* sub optimized leg */
+		skb = ring->skb = napi_alloc_skb(&ring->tqp_vector->napi,
+						HNS3_RX_HEAD_SIZE);
+	}
 	if (unlikely(!skb)) {
 		hns3_rl_err(netdev, "failed to build skb from RX'ed buffer\n");
 
@@ -3259,6 +3274,20 @@ hns3_build_skb_(struct hns3_enet_ring *ring, unsigned int length)
 	u64_stats_update_begin(&ring->syncp);
 	ring->stats.seg_pkt_cnt++;
 	u64_stats_update_end(&ring->syncp);
+
+	/* copy part of header to the skb head if it is a GRO/jumbo packet */
+	if (!eop) {
+		ethhlen = eth_get_headlen(netdev, ring->va, HNS3_RX_HEAD_SIZE);
+		__skb_put(skb, ethhlen);
+		memcpy(skb->data, ring->va, ALIGN(ethhlen, sizeof(long)));
+
+		skb_add_rx_frag(skb, ring->frag_num++, desc_cb->priv,
+				desc_cb->page_offset + ethhlen, length - ethhlen,
+				hns3_buf_size(ring));
+
+		desc_cb->pagecnt_bias--;
+		trace_hns3_rx_desc(ring);
+	}
 
 	hns3_adjust_page_offset(desc_cb);
 	hns3_rx_ring_move_fw(ring);
